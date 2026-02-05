@@ -1,0 +1,71 @@
+services:
+  torrust:
+    # Build from the local directory
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        RUST_VERSION: "1.93"
+        ALPINE_VERSION: "3.23"
+        # Ensure this matches your VPS arch (aarch64 for Oracle ARM)
+        TARGET_ARCH: "aarch64-unknown-linux-musl"
+
+    image: torrust:latest
+    container_name: torrust
+    restart: unless-stopped
+
+    # ======================================================
+    # NETWORK CONFIGURATION
+    # ======================================================
+    ports:
+      # SOCKS5 Proxy (Bind to localhost for security, or 0.0.0.0 for public)
+      - "127.0.0.1:9150:9150"
+      # DNS-over-TCP Proxy
+      - "127.0.0.1:5353:5353"
+
+    # ======================================================
+    # SECURITY HARDENING (CRITICAL)
+    # ======================================================
+    # 1. Capabilities
+    # We DROP everything by default for minimal attack surface.
+    cap_drop:
+      - ALL
+    # We ADD only IPC_LOCK to allow 'mlock' (preventing RAM swapping).
+    cap_add:
+      - IPC_LOCK
+
+    # 2. Filesystem
+    # The container cannot be modified at runtime. 
+    # Since Arti runs 100% in-memory, we don't even need a /tmp volume.
+    read_only: true
+
+    # 3. Security Options
+    security_opt:
+      - no-new-privileges:true
+
+    # ======================================================
+    # APP CONFIGURATION
+    # ======================================================
+    environment:
+      # Network
+      - COMMON_SOCKS_PROXY_PORT=9150
+      - COMMON_DNS_PROXY_PORT=5353
+      
+      # Security & Privacy
+      - SECMEM_STRICT=1                 # Crash if memory hardening fails
+      - TORGO_ENABLE_CHAFF=1            # Enable fake background traffic
+      - TORGO_PARANOID_TRAFFIC_PERCENT=50 # % of requests getting a unique circuit
+      
+      # Logging (RUST_LOG controls tracing verbosity)
+      - RUST_LOG=info
+
+    # ======================================================
+    # HEALTHCHECK
+    # ======================================================
+    # Uses the static binary's built-in self-check mode
+    healthcheck:
+      test: ["CMD", "/torrust", "--selfcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
