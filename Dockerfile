@@ -1,71 +1,47 @@
 # syntax=docker/dockerfile:1.7
-
-# ==========================================
-# Arguments (Version Control)
-# ==========================================
 ARG RUST_VERSION=1.93
 ARG ALPINE_VERSION=3.23
 ARG APP_NAME=torrust
-# Target Architecture for your Oracle VPS (ARM64)
 ARG TARGET_ARCH=aarch64-unknown-linux-musl
 
-# ==========================================
-# Stage 1: The Hardened Builder
-# ==========================================
+# === STAGE 1: BUILD ===
 FROM rust:${RUST_VERSION}-alpine${ALPINE_VERSION} AS builder
-
 ARG APP_NAME
 ARG TARGET_ARCH
 
-# 1. Install Build Dependencies
-# musl-dev: Required for static linking
-# gcc/build-base: Required for compiling C dependencies of Rust crates
 RUN apk add --no-cache musl-dev gcc build-base
-
-# 2. Add the specific architecture target (ARM64 Musl)
 RUN rustup target add ${TARGET_ARCH}
 
 WORKDIR /app
-
-# 3. Cache Dependencies (Optimization)
-# We copy only the dependency manifests first to cache the build of external crates
 COPY Cargo.toml Cargo.lock ./
-# Create a dummy main.rs to satisfy the compiler
 RUN mkdir src && echo "fn main() {}" > src/main.rs
-
-# Build dependencies only (This layer is cached unless Cargo.toml changes)
+# Cache dependencies
 RUN cargo build --release --target ${TARGET_ARCH}
 
-# 4. Build the Actual Application
+# Build App
 COPY src ./src
-# Touch main.rs to force a rebuild of the application code
 RUN touch src/main.rs
 
-# === SECURITY HARDENING FLAGS ===
-# -C relocation-model=pie:         Force Position Independent Executable (ASLR)
-# -C link-arg=-static-pie:         Link as a static binary but keep randomization info
-# -C link-arg=-Wl,-z,relro,-z,now: Full Read-Only Relocations (Anti-Exploit)
-# -C target-feature=+crt-static:   Bundle the C-Runtime statically
-RUN RUSTFLAGS="-C relocation-model=pie -C link-arg=-static-pie -C link-arg=-Wl,-z,relro,-z,now -C target-feature=+crt-static" \
+# === [CHANGE 1] SIMPLIFIED BUILD FLAGS ===
+# Removed "-C link-arg=-static-pie" which causes Segfaults on some ARM systems.
+# We just use standard static linking now.
+RUN RUSTFLAGS="-C target-feature=+crt-static -C strip=symbols" \
     cargo build --release --target ${TARGET_ARCH}
 
-# ==========================================
-# Stage 2: The Debug Runtime (Temporary)
-# ==========================================
-# CHANGE: FROM scratch -> FROM alpine:3.23
-FROM alpine:3.23
+# === STAGE 2: DEBUG RUNTIME ===
+# === [CHANGE 2] USE ALPINE INSTEAD OF SCRATCH ===
+FROM alpine:${ALPINE_VERSION}
 
 ARG APP_NAME
 ARG TARGET_ARCH
 
-# Install runtime dependencies for debugging (SSL certs + bash)
+# Install standard tools for debugging
 RUN apk add --no-cache ca-certificates bash curl
 
 # Copy the binary
 COPY --from=builder /app/target/${TARGET_ARCH}/release/${APP_NAME} /torrust
 
-# DISABLE: USER 10001 (Run as root for now to rule out permission errors)
-# USER 10001
+# === [CHANGE 3] RUN AS ROOT FOR DEBUGGING ===
+# USER 10001 
 
-# Entrypoint remains the same
 ENTRYPOINT ["/torrust"]
