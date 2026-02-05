@@ -24,7 +24,9 @@ permissions:
 
 jobs:
   build-and-publish:
-    runs-on: ubuntu-latest
+    # CHANGE 1: Use the native ARM runner (Much faster for arm64 builds)
+    runs-on: ubuntu-24.04-arm
+    
     env:
       IMAGE_REF: ghcr.io/${{ github.repository }}
 
@@ -32,8 +34,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      # REMOVED: "Set up QEMU" step is no longer needed (Native ARM)
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -62,6 +63,7 @@ jobs:
         with:
           context: .
           file: Dockerfile
+          # CHANGE 2: This is now a native build, not an emulated one
           platforms: linux/arm64
           push: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run != true }}
           tags: ${{ steps.meta.outputs.tags }}
