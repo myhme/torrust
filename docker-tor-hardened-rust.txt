@@ -23,8 +23,8 @@ profile docker-tor-hardened-rust flags=(attach_disconnected,mediate_deleted) {
   capability ipc_lock,
 
   # --- Tor state (tmpfs, pre-created) ---
-  /var/lib/tor/ rwc,
-  /var/lib/tor/** rwck,
+  /var/lib/tor/ rw,
+  /var/lib/tor/** rwk,
 
   # --- Temporary files ---
   /tmp/** rwk,
