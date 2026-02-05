@@ -17,6 +17,7 @@ use arti_client::{
     config::CfgPath,
 };
 
+use rustls::crypto::CryptoProvider;
 use tokio::signal;
 
 #[derive(Parser, Debug)]
@@ -29,6 +30,12 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // ------------------------------------------------------------
+    // 0. Install crypto provider (MUST be first)
+    // ------------------------------------------------------------
+    CryptoProvider::install_default()
+        .expect("Failed to install default crypto provider");
+
     // ------------------------------------------------------------
     // 1. Logging (stdout only, no files)
     // ------------------------------------------------------------
@@ -72,7 +79,8 @@ async fn main() -> Result<()> {
 
     let mut tor_cfg = TorClientConfig::builder();
 
-    // Force Tor state into tmpfs (NO $HOME usage)
+    // IMPORTANT:
+    // /var/lib/tor/state/state MUST already exist (created in Dockerfile)
     tor_cfg
         .storage()
         .state_dir(CfgPath::new("/var/lib/tor/state".into()))
