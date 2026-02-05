@@ -55,9 +55,9 @@ RUN addgroup -S torrust \
 
 # ---- Pre-create Tor state layout (IMMUTABLE STRUCTURE) ----
 # This is REQUIRED to remove AppArmor 'c' permission
-RUN mkdir -p /var/lib/tor/state \
+RUN mkdir -p /var/lib/tor/state/state \
  && chown -R torrust:torrust /var/lib/tor \
- && chmod 700 /var/lib/tor/state
+ && chmod 700 /var/lib/tor/state/state
 
 # ---- Copy binary ----
 # Now ${TARGET_ARCH} will be correctly populated
