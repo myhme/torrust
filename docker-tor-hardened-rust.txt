@@ -2,19 +2,16 @@
 
 profile docker-tor-hardened-rust flags=(attach_disconnected,mediate_deleted) {
   #include <abstractions/base>
-  #include <abstractions/nameservice> # Essential for DNS/SSL resolution
+  #include <abstractions/nameservice>
 
   # === THE BINARY ===
-  # The new static binary is at the root of the container
   /torrust rmix,
 
   # === READ-ONLY SYSTEM FILES ===
-  # Required for Arti (Tor) to verify TLS certificates
   /etc/ssl/certs/** r,
   /etc/pki/tls/certs/** r,
   /usr/share/ca-certificates/** r,
   
-  # Basic system reads (CPU/Mem info for optimizations)
   @{PROC}/sys/kernel/random/uuid r,
   @{PROC}/sys/kernel/osrelease r,
   @{PROC}/meminfo r,
@@ -22,18 +19,17 @@ profile docker-tor-hardened-rust flags=(attach_disconnected,mediate_deleted) {
   # === NETWORK ===
   network inet tcp,
   network inet udp,
-  # Security: Deny raw socket creation (prevents packet crafting)
   deny network raw,
 
   # === CAPABILITIES ===
-  # Required for SECMEM (preventing RAM swapping to disk)
   capability ipc_lock,
 
+  # === ALLOW WRITING TO RAM DISK (CRITICAL FIX) ===
+  # This allows Arti to write its state/cache to the tmpfs mount.
+  # We must add this BEFORE the "deny all" rule.
+  /var/lib/tor/** rw,
+  /var/lib/tor/ rw,
+
   # === DENY EVERYTHING ELSE ===
-  # Since we are FROM scratch, there is no shell, no /bin, no /tmp
-  # We explicitly deny writing anywhere.
   deny /** w,
-  
-  # Allow writing only to stdout/stderr (handled by Docker)
-  # No explicit rule needed usually, but 'file' rules cover it.
 }
