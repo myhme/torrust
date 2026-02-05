@@ -66,4 +66,6 @@ codegen-units = 1
 # 5. Panic Abort: CRITICAL SECURITY FEATURE
 # If the app crashes, it dies instantly. It does NOT unwind the stack.
 # This prevents memory layouts or sensitive data from leaking in stack traces.
-panic = "abort"
+# CHANGE THIS LINE:
+# panic = "abort"  <-- Delete or Comment this out
+panic = "unwind"   # <-- Add this. It allows the error to be printed.

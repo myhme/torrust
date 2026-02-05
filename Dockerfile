@@ -50,23 +50,22 @@ RUN RUSTFLAGS="-C relocation-model=pie -C link-arg=-static-pie -C link-arg=-Wl,-
     cargo build --release --target ${TARGET_ARCH}
 
 # ==========================================
-# Stage 2: The Zero Trust Runtime
+# Stage 2: The Debug Runtime (Temporary)
 # ==========================================
-FROM scratch
+# CHANGE: FROM scratch -> FROM alpine:3.23
+FROM alpine:3.23
 
 ARG APP_NAME
 ARG TARGET_ARCH
 
-# 1. Copy SSL Certificates 
-# Required for Tor to verify Directory Authorities
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+# Install runtime dependencies for debugging (SSL certs + bash)
+RUN apk add --no-cache ca-certificates bash curl
 
-# 2. Copy the Hardened Static Binary
+# Copy the binary
 COPY --from=builder /app/target/${TARGET_ARCH}/release/${APP_NAME} /torrust
 
-# 3. Security: Run as unprivileged user
-# UID 10001 does not exist in the host system map usually, ensuring isolation
-USER 10001
+# DISABLE: USER 10001 (Run as root for now to rule out permission errors)
+# USER 10001
 
-# 4. Entrypoint
+# Entrypoint remains the same
 ENTRYPOINT ["/torrust"]
