@@ -2,33 +2,35 @@
 
 profile docker-tor-hardened-rust flags=(attach_disconnected,mediate_deleted) {
 
-  # --- Base abstractions ---
-  # These REQUIRE <tunables/global> above
+  # REQUIRED base permissions
   #include <abstractions/base>
   #include <abstractions/nameservice>
 
-  # --- Executable ---
+  # Executable
   /torrust rmix,
 
-  # --- TLS trust roots ---
+  # TLS trust roots
   /etc/ssl/certs/** r,
   /usr/share/ca-certificates/** r,
 
-  # --- Networking ---
+  # Networking
   network inet tcp,
   network inet udp,
   deny network raw,
 
-  # --- Capabilities ---
+  # Capabilities
   capability ipc_lock,
 
-  # --- Tor state (tmpfs, pre-created) ---
+  # Tor state (pre-created, tmpfs)
   /var/lib/tor/ rw,
   /var/lib/tor/** rwk,
 
-  # --- Temporary files ---
+  # Temp
   /tmp/** rwk,
 
-  # --- Final deny ---
+  # Silence container probe noise (optional)
+  /proc/1/cgroup r,
+
+  # Default deny
   deny /** w,
 }
