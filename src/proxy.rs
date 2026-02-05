@@ -6,8 +6,9 @@ use tracing::{info, debug, error};
 use arti_client::TorClient;
 use crate::config::Config;
 
-// Define the Runtime type based on your Cargo.toml features (tokio + rustls)
-type ArtiRuntime = arti_client::runtimes::tokio::TokioRustlsRuntime;
+// [FIX] Use PreferredRuntime to match the runtime used in main.rs
+use tor_rtcompat::PreferredRuntime;
+type ArtiRuntime = PreferredRuntime;
 
 pub async fn start_socks_server(
     tor_client: Arc<TorClient<ArtiRuntime>>, 
@@ -116,7 +117,7 @@ async fn handle_socks_connection(
     // PHASE 3: Tor Connection
     // =============================================================
     match tor_client.connect((target_addr.as_str(), port)).await {
-        Ok(mut tor_stream) => {
+        Ok(tor_stream) => { // [FIX] Removed 'mut' here
             // Reply: Success (0x00)
             // BND.ADDR and BND.PORT are zeroed as we don't bind locally
             stream.write_all(&[0x05, 0x00, 0x00, 0x01, 0,0,0,0, 0,0]).await?;
