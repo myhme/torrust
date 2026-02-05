@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
             panic!("ABORT: strict mode requires hardened kernel");
         }
 
-        // Never allow root in strict mode
+        // Enforce non-root in strict mode
         if unsafe { libc::geteuid() } == 0 {
             panic!("ABORT: running as root violates zero-trust model");
         }
@@ -70,21 +70,16 @@ async fn main() -> Result<()> {
     // ------------------------------------------------------------
     info!("Configuring in-memory ephemeral Tor state");
 
-    // IMPORTANT:
-    // These directories MUST already exist in the image
-    // and MUST be backed by tmpfs in docker-compose.
     let mut tor_cfg = TorClientConfig::builder();
 
+    // Force Tor state into tmpfs (NO $HOME usage)
     tor_cfg
         .storage()
         .state_dir(CfgPath::new("/var/lib/tor/state".into()))
         .cache_dir(CfgPath::new("/var/lib/tor/cache".into()))
-        // Required in containers + tmpfs where UID/GID checks fail
+        // Required for containers + tmpfs
         .permissions()
         .dangerously_trust_everyone();
-
-    // Explicitly avoid accidental persistence
-    //tor_cfg.application().allow_running_as_root(false);
 
     let tor_cfg = tor_cfg
         .build()
@@ -102,7 +97,7 @@ async fn main() -> Result<()> {
     let tor_client = Arc::new(tor_client);
 
     // ------------------------------------------------------------
-    // 6. Self-check mode (optional)
+    // 6. Self-check mode
     // ------------------------------------------------------------
     if args.selfcheck {
         info!("Running self-check (no services started)");
