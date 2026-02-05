@@ -10,6 +10,7 @@ ARG TARGET_ARCH=aarch64-unknown-linux-musl
 # ================================
 FROM rust:${RUST_VERSION}-alpine${ALPINE_VERSION} AS builder
 
+# Re-declare ARGs for this stage
 ARG APP_NAME
 ARG TARGET_ARCH
 
@@ -40,7 +41,9 @@ RUN RUSTFLAGS="-C target-feature=+crt-static -C strip=symbols" \
 # ================================
 FROM alpine:${ALPINE_VERSION}
 
+# Re-declare ARGs for this stage (CRITICAL FIX)
 ARG APP_NAME
+ARG TARGET_ARCH
 
 # ---- Minimal runtime deps ----
 # ca-certificates needed for Tor directory authorities
@@ -57,6 +60,7 @@ RUN mkdir -p /var/lib/tor/state \
  && chmod 700 /var/lib/tor/state
 
 # ---- Copy binary ----
+# Now ${TARGET_ARCH} will be correctly populated
 COPY --from=builder /app/target/${TARGET_ARCH}/release/${APP_NAME} /torrust
 
 # ---- Permissions hardening ----
