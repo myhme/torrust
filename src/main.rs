@@ -17,7 +17,8 @@ use arti_client::{
     config::CfgPath,
 };
 
-use rustls::crypto::CryptoProvider;
+// === [FIX] Import the Ring provider explicitly ===
+use rustls::crypto::ring; 
 use tokio::signal;
 
 #[derive(Parser, Debug)]
@@ -33,7 +34,9 @@ async fn main() -> Result<()> {
     // ------------------------------------------------------------
     // 0. Install crypto provider (MUST be first)
     // ------------------------------------------------------------
-    CryptoProvider::install_default()
+    // === [FIX] Call default_provider() to get the struct, then install it ===
+    ring::default_provider()
+        .install_default()
         .expect("Failed to install default crypto provider");
 
     // ------------------------------------------------------------
