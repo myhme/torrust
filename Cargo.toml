@@ -1,0 +1,69 @@
+[package]
+name = "torrust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# ==========================================
+# Core: Embedded Tor (Arti)
+# ==========================================
+# We explicitly disable default features (OpenSSL) and enable 'rustls' + 'static'.
+# This is CRITICAL for building a portable static binary on Linux.
+arti-client = { version = "0.23", features = ["tokio", "rustls", "static"], default-features = false }
+tor-rtcompat = { version = "0.23", features = ["tokio", "rustls"], default-features = false }
+
+# ==========================================
+# Async Runtime
+# ==========================================
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# ==========================================
+# Security & Kernel Hardening
+# ==========================================
+libc = "0.2"           # For raw syscalls (prctl/PR_SET_DUMPABLE)
+rlimit = "0.10"        # For disabling core dumps (RLIMIT_CORE)
+zeroize = "1.7"        # For secure memory wiping
+
+# ==========================================
+# Network & Protocols
+# ==========================================
+bytes = "1"
+anyhow = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+dotenvy = "0.15"       # To load config from .env files
+dns-message-parser = "0.7"  # For parsing DNS-over-TCP packets
+
+# ==========================================
+# Chaff & Utilities
+# ==========================================
+chrono = "0.4"         # For Circadian rhythm timing
+rand = "0.8"           # For jitter and random selection
+rand_distr = "0.4"     # For Gaussian distribution (realistic browsing times)
+clap = { version = "4.4", features = ["derive"] } # For CLI flags (--selfcheck)
+
+# HTTP Client (Optional: Included for future expansion of Chaff logic)
+reqwest = { version = "0.11", features = ["socks", "rustls-tls"], default-features = false }
+
+# ==========================================
+# Hardening Profile (Anti-Forensics)
+# ==========================================
+[profile.release]
+# 1. Strip Symbols: Removes debugging info (makes reverse engineering harder)
+strip = true 
+
+# 2. Link Time Optimization: Removes dead code, reduces binary size
+lto = true 
+
+# 3. Optimization Level: 'z' optimizes for size (smaller binaries = less cache miss)
+opt-level = "z" 
+
+# 4. Single Codegen Unit: Slower build, but better optimization
+codegen-units = 1
+
+# 5. Panic Abort: CRITICAL SECURITY FEATURE
+# If the app crashes, it dies instantly. It does NOT unwind the stack.
+# This prevents memory layouts or sensitive data from leaking in stack traces.
+panic = "abort"

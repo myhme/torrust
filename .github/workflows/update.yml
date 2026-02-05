@@ -1,0 +1,43 @@
+name: Keep Rust Dependencies Updated
+
+on:
+  schedule:
+    - cron: '20 4 * * 4'
+  workflow_dispatch:
+
+jobs:
+  update-deps:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-edit
+        run: cargo install cargo-edit
+
+      - name: Update Dependencies
+        run: |
+          cargo update
+          # Optional: Upgrade to latest semver compatible
+          cargo upgrade --incompatible allow
+
+      - name: Audit for Vulnerabilities
+        run: |
+          cargo install cargo-audit
+          cargo audit
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore(deps): update cargo dependencies"
+          title: "chore(deps): update Rust dependencies"
+          body: "Automated `cargo update` and security audit."
+          branch: deps/cargo-update
+          delete-branch: true
