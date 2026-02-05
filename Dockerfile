@@ -1,47 +1,69 @@
 # syntax=docker/dockerfile:1.7
+
 ARG RUST_VERSION=1.93
 ARG ALPINE_VERSION=3.23
 ARG APP_NAME=torrust
 ARG TARGET_ARCH=aarch64-unknown-linux-musl
 
-# === STAGE 1: BUILD ===
+# ================================
+# STAGE 1: BUILD (STATIC MUSL)
+# ================================
 FROM rust:${RUST_VERSION}-alpine${ALPINE_VERSION} AS builder
+
 ARG APP_NAME
 ARG TARGET_ARCH
 
-RUN apk add --no-cache musl-dev gcc build-base
+# Build dependencies only
+RUN apk add --no-cache \
+    musl-dev \
+    gcc \
+    build-base
+
 RUN rustup target add ${TARGET_ARCH}
 
 WORKDIR /app
+
+# ---- Dependency cache layer ----
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo "fn main() {}" > src/main.rs
-# Cache dependencies
 RUN cargo build --release --target ${TARGET_ARCH}
 
-# Build App
+# ---- Build actual app ----
 COPY src ./src
-RUN touch src/main.rs
 
-# === [CHANGE 1] SIMPLIFIED BUILD FLAGS ===
-# Removed "-C link-arg=-static-pie" which causes Segfaults on some ARM systems.
-# We just use standard static linking now.
+# Static, stripped, reproducible
 RUN RUSTFLAGS="-C target-feature=+crt-static -C strip=symbols" \
     cargo build --release --target ${TARGET_ARCH}
 
-# === STAGE 2: DEBUG RUNTIME ===
-# === [CHANGE 2] USE ALPINE INSTEAD OF SCRATCH ===
+# ================================
+# STAGE 2: RUNTIME (HARDENED)
+# ================================
 FROM alpine:${ALPINE_VERSION}
 
 ARG APP_NAME
-ARG TARGET_ARCH
 
-# Install standard tools for debugging
-RUN apk add --no-cache ca-certificates bash curl
+# ---- Minimal runtime deps ----
+# ca-certificates needed for Tor directory authorities
+RUN apk add --no-cache ca-certificates
 
-# Copy the binary
+# ---- Create unprivileged user ----
+RUN addgroup -S torrust \
+ && adduser  -S -D -H -u 10001 -G torrust torrust
+
+# ---- Pre-create Tor state layout (IMMUTABLE STRUCTURE) ----
+# This is REQUIRED to remove AppArmor 'c' permission
+RUN mkdir -p /var/lib/tor/state \
+ && chown -R torrust:torrust /var/lib/tor \
+ && chmod 700 /var/lib/tor/state
+
+# ---- Copy binary ----
 COPY --from=builder /app/target/${TARGET_ARCH}/release/${APP_NAME} /torrust
 
-# === [CHANGE 3] RUN AS ROOT FOR DEBUGGING ===
-# USER 10001 
+# ---- Permissions hardening ----
+RUN chmod 0555 /torrust
 
+# ---- Drop privileges permanently ----
+USER 10001
+
+# ---- No shell, no args injection ----
 ENTRYPOINT ["/torrust"]

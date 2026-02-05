@@ -4,32 +4,34 @@ profile docker-tor-hardened-rust flags=(attach_disconnected,mediate_deleted) {
   #include <abstractions/base>
   #include <abstractions/nameservice>
 
-  # === THE BINARY ===
+  # Executable
   /torrust rmix,
 
-  # === READ-ONLY SYSTEM FILES ===
+  # TLS trust roots
   /etc/ssl/certs/** r,
-  /etc/pki/tls/certs/** r,
   /usr/share/ca-certificates/** r,
-  
+
+  # Minimal proc access
   @{PROC}/sys/kernel/random/uuid r,
   @{PROC}/sys/kernel/osrelease r,
   @{PROC}/meminfo r,
+  /proc/1/cgroup r,
 
-  # === NETWORK ===
+  # Network
   network inet tcp,
   network inet udp,
   deny network raw,
 
-  # === CAPABILITIES ===
+  # Capability
   capability ipc_lock,
 
-  # === ALLOW WRITING TO RAM DISK (CRITICAL FIX) ===
-  # This allows Arti to write its state/cache to the tmpfs mount.
-  # We must add this BEFORE the "deny all" rule.
-  /var/lib/tor/** rw,
+  # Tor state (NO creation allowed)
   /var/lib/tor/ rw,
+  /var/lib/tor/** rwk,
 
-  # === DENY EVERYTHING ELSE ===
+  # Temp
+  /tmp/** rwk,
+
+  # Default deny
   deny /** w,
 }
