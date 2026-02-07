@@ -8,7 +8,7 @@ mod hardening;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use std::{sync::Arc, fs};
+use std::{fs, sync::Arc};
 use tracing::{error, info, warn};
 
 use arti_client::{
@@ -17,14 +17,13 @@ use arti_client::{
     config::CfgPath,
 };
 
-// === Crypto provider (Ring) ===
 use rustls::crypto::ring;
 use tokio::signal;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Run a minimal connectivity self-check and exit
+    /// Run a minimal Tor bootstrap self-check and exit
     #[arg(long)]
     selfcheck: bool,
 }
@@ -39,7 +38,7 @@ async fn main() -> Result<()> {
         .expect("Failed to install default crypto provider");
 
     // ------------------------------------------------------------
-    // 1. Logging (stdout only, no files)
+    // 1. Logging (stdout only)
     // ------------------------------------------------------------
     tracing_subscriber::fmt()
         .with_target(false)
@@ -49,12 +48,12 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     // ------------------------------------------------------------
-    // 2. Load Configuration
+    // 2. Load configuration
     // ------------------------------------------------------------
     let cfg = config::load();
 
     // ------------------------------------------------------------
-    // 3. Security Hardening
+    // 3. Security hardening
     // ------------------------------------------------------------
     if cfg.strict_mode {
         info!("Strict zero-trust mode enabled");
@@ -64,7 +63,6 @@ async fn main() -> Result<()> {
             panic!("ABORT: strict mode requires hardened kernel");
         }
 
-        // Enforce non-root in strict mode
         if unsafe { libc::geteuid() } == 0 {
             panic!("ABORT: running as root violates zero-trust model");
         }
@@ -75,42 +73,32 @@ async fn main() -> Result<()> {
     info!("torrust zero-trust active. Mode: Embedded Arti");
 
     // ------------------------------------------------------------
-    // 4. Configure Embedded Tor (RAM-only, explicit tmpfs)
+    // 4. Prepare tmpfs-backed Tor directories
     // ------------------------------------------------------------
-    info!("Configuring in-memory ephemeral Tor state");
+    fs::create_dir_all(&cfg.tor_state_dir)
+        .context("Tor state directory must be writable (tmpfs)")?;
 
-    // 🔐 Resolve state/cache dirs explicitly (NO implicit defaults)
-    let state_dir = std::env::var("XDG_DATA_HOME")
-        .unwrap_or_else(|_| "/var/lib/tor/state".to_string());
+    fs::create_dir_all(&cfg.tor_cache_dir)
+        .context("Tor cache directory must be writable (tmpfs)")?;
 
-    let cache_dir = std::env::var("XDG_CACHE_HOME")
-        .unwrap_or_else(|_| "/var/lib/tor/state".to_string());
-
-    info!("Tor state dir : {}", state_dir);
-    info!("Tor cache dir : {}", cache_dir);
-
-    // 🔐 MUST exist and be writable (tmpfs)
-    fs::create_dir_all(&state_dir)
-        .context("Tor state directory is not writable (tmpfs required)")?;
-    fs::create_dir_all(&cache_dir)
-        .context("Tor cache directory is not writable (tmpfs required)")?;
-
-    // 🔒 Lock down permissions (defense in depth)
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700))?;
-        fs::set_permissions(&cache_dir, fs::Permissions::from_mode(0o700))?;
+        fs::set_permissions(&cfg.tor_state_dir, fs::Permissions::from_mode(0o700))?;
+        fs::set_permissions(&cfg.tor_cache_dir, fs::Permissions::from_mode(0o700))?;
     }
+
+    // ------------------------------------------------------------
+    // 5. Configure embedded Tor (arti-client 0.39)
+    // ------------------------------------------------------------
+    info!("Configuring in-memory Tor state (tmpfs)");
 
     let mut tor_cfg = TorClientConfig::builder();
 
     tor_cfg
         .storage()
-        // ✅ EXPLICIT paths — no fallback to /
-        .state_dir(CfgPath::new(state_dir.into()))
-        .cache_dir(CfgPath::new(cache_dir.into()))
-        // Required for containers + tmpfs + non-root
+        .state_dir(CfgPath::new(cfg.tor_state_dir.clone()))
+        .cache_dir(CfgPath::new(cfg.tor_cache_dir.clone()))
         .permissions()
         .dangerously_trust_everyone();
 
@@ -119,38 +107,30 @@ async fn main() -> Result<()> {
         .context("Failed to build TorClientConfig")?;
 
     // ------------------------------------------------------------
-    // 5. Bootstrap Tor
+    // 6. Bootstrap Tor (NEW 0.39 API)
     // ------------------------------------------------------------
-    info!("Bootstrapping embedded Tor circuit (memory-only)");
+    info!("Bootstrapping embedded Tor");
 
-    let tor_client = TorClient::create_bootstrapped(tor_cfg)
+    let tor_client = TorClient::builder()
+        .config(tor_cfg)
+        .create_bootstrapped()
         .await
         .context("Failed to bootstrap Tor")?;
 
     let tor_client = Arc::new(tor_client);
 
     // ------------------------------------------------------------
-    // 6. Self-check mode
+    // 7. Self-check mode (NO external traffic)
     // ------------------------------------------------------------
     if args.selfcheck {
-        info!("Running self-check (no services started)");
-
-        match tor_client.connect(("1.1.1.1", 53)).await {
-            Ok(_) => {
-                info!("Self-check OK: Tor circuit established");
-                std::process::exit(0);
-            }
-            Err(e) => {
-                error!("Self-check FAILED: {e}");
-                std::process::exit(1);
-            }
-        }
+        info!("Self-check OK: Tor successfully bootstrapped");
+        std::process::exit(0);
     }
 
     info!("Identity shielding active. Starting services");
 
     // ------------------------------------------------------------
-    // 7. SOCKS5 Proxy
+    // 8. SOCKS5 proxy
     // ------------------------------------------------------------
     {
         let tor = tor_client.clone();
@@ -163,7 +143,7 @@ async fn main() -> Result<()> {
     }
 
     // ------------------------------------------------------------
-    // 8. DNS Proxy
+    // 9. DNS proxy
     // ------------------------------------------------------------
     {
         let tor = tor_client.clone();
@@ -176,7 +156,7 @@ async fn main() -> Result<()> {
     }
 
     // ------------------------------------------------------------
-    // 9. Chaff / Traffic Shaping
+    // 10. Chaff / traffic shaping (optional)
     // ------------------------------------------------------------
     if cfg.chaff_enabled {
         let tor = tor_client.clone();
@@ -187,7 +167,7 @@ async fn main() -> Result<()> {
     }
 
     // ------------------------------------------------------------
-    // 10. Shutdown handling
+    // 11. Shutdown handling
     // ------------------------------------------------------------
     match signal::ctrl_c().await {
         Ok(()) => info!("Shutdown signal received"),

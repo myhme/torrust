@@ -1,149 +1,133 @@
-use anyhow::{Result, Context, bail};
+// src/proxy.rs
+
+use anyhow::{Context, Result};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{info, debug, error};
-use arti_client::TorClient;
+use tracing::{error, info};
+
+use arti_client::{TorClient, Stream};
+
 use crate::config::Config;
 
-// [FIX] Use PreferredRuntime to match the runtime used in main.rs
-use tor_rtcompat::PreferredRuntime;
-type ArtiRuntime = PreferredRuntime;
-
+/// Start a SOCKS5 proxy that forwards all traffic through Tor
 pub async fn start_socks_server(
-    tor_client: Arc<TorClient<ArtiRuntime>>, 
-    config: Config
+    tor: Arc<TorClient>,
+    cfg: Config,
 ) -> Result<()> {
-    let addr = format!("0.0.0.0:{}", config.socks_port);
-    let listener = TcpListener::bind(&addr).await
-        .with_context(|| format!("Failed to bind SOCKS5 listener on {}", addr))?;
+    let bind_addr = SocketAddr::from(([0, 0, 0, 0], cfg.socks_port));
+    let listener = TcpListener::bind(bind_addr)
+        .await
+        .context("Failed to bind SOCKS listener")?;
 
-    info!("SOCKS5 Listener active on {}", addr);
+    info!("SOCKS5 proxy listening on {}", bind_addr);
 
     loop {
-        // Accept incoming connection
-        let (stream, peer_addr) = listener.accept().await?;
-        let client = tor_client.clone();
-        
-        tokio::spawn(async move {
-            // Set a 10s timeout for the handshake to prevent stuck connections
-            let result = tokio::time::timeout(
-                std::time::Duration::from_secs(10), 
-                handle_socks_connection(stream, client)
-            ).await;
+        let (socket, _) = listener.accept().await?;
+        let tor = tor.clone();
 
-            match result {
-                Ok(Err(e)) => debug!("SOCKS error from {}: {}", peer_addr, e),
-                Err(_) => debug!("SOCKS handshake timed out: {}", peer_addr),
-                _ => {}
+        tokio::spawn(async move {
+            if let Err(e) = handle_socks_connection(socket, tor).await {
+                error!("SOCKS connection error: {e}");
             }
         });
     }
 }
 
 async fn handle_socks_connection(
-    mut stream: TcpStream,
-    tor_client: Arc<TorClient<ArtiRuntime>>
+    mut client: TcpStream,
+    tor: Arc<TorClient>,
 ) -> Result<()> {
-    // =============================================================
-    // PHASE 1: Authentication Negotiation
-    // =============================================================
+    // -------------------------------
+    // SOCKS5 handshake (minimal)
+    // -------------------------------
     let mut header = [0u8; 2];
-    stream.read_exact(&mut header).await?;
-    
+    client.read_exact(&mut header).await?;
+
     if header[0] != 0x05 {
-        bail!("Invalid SOCKS version: {}", header[0]);
-    }
-    
-    let n_methods = header[1] as usize;
-    let mut methods = vec![0u8; n_methods];
-    stream.read_exact(&mut methods).await?;
-
-    // We only support "No Authentication" (0x00)
-    if !methods.contains(&0x00) {
-        stream.write_all(&[0x05, 0xFF]).await?; // No acceptable methods
-        bail!("Client does not support No-Auth");
-    }
-    // Reply: Version 5, Method 0 (No Auth)
-    stream.write_all(&[0x05, 0x00]).await?;
-
-    // =============================================================
-    // PHASE 2: Request Details
-    // =============================================================
-    // Format: [VER, CMD, RSV, ATYP]
-    let mut request_header = [0u8; 4];
-    stream.read_exact(&mut request_header).await?;
-
-    if request_header[1] != 0x01 { // CMD must be CONNECT (0x01)
-        write_error(&mut stream, 0x07).await?; // Command not supported
-        bail!("Unsupported command: {}", request_header[1]);
+        anyhow::bail!("Unsupported SOCKS version");
     }
 
-    // Parse Address based on ATYP (Address Type)
-    let target_addr = match request_header[3] {
-        0x01 => { // IPv4 (Fixed 4 bytes)
-            let mut buf = [0u8; 4];
-            stream.read_exact(&mut buf).await?;
-            std::net::Ipv4Addr::from(buf).to_string()
-        },
-        0x03 => { // Domain Name (Variable Length)
-            let mut len_byte = [0u8; 1];
-            stream.read_exact(&mut len_byte).await?;
-            let len = len_byte[0] as usize;
-            
-            let mut domain_buf = vec![0u8; len];
-            stream.read_exact(&mut domain_buf).await?;
-            String::from_utf8(domain_buf).context("Invalid UTF-8 in domain")?
-        },
-        0x04 => { // IPv6 (Fixed 16 bytes)
-             let mut buf = [0u8; 16];
-             stream.read_exact(&mut buf).await?;
-             std::net::Ipv6Addr::from(buf).to_string()
-        },
-        _ => {
-            write_error(&mut stream, 0x08).await?; // Address type not supported
-            bail!("Unknown address type: {}", request_header[3]);
+    let nmethods = header[1] as usize;
+    let mut methods = vec![0u8; nmethods];
+    client.read_exact(&mut methods).await?;
+
+    // No authentication
+    client.write_all(&[0x05, 0x00]).await?;
+
+    // -------------------------------
+    // SOCKS5 request
+    // -------------------------------
+    let mut req = [0u8; 4];
+    client.read_exact(&mut req).await?;
+
+    if req[0] != 0x05 || req[1] != 0x01 {
+        anyhow::bail!("Only CONNECT supported");
+    }
+
+    let atyp = req[3];
+    let target = match atyp {
+        0x01 => { // IPv4
+            let mut addr = [0u8; 4];
+            client.read_exact(&mut addr).await?;
+            let mut port = [0u8; 2];
+            client.read_exact(&mut port).await?;
+            (
+                std::net::IpAddr::from(addr).to_string(),
+                u16::from_be_bytes(port),
+            )
         }
+        0x03 => { // Domain
+            let mut len = [0u8; 1];
+            client.read_exact(&mut len).await?;
+            let mut domain = vec![0u8; len[0] as usize];
+            client.read_exact(&mut domain).await?;
+            let mut port = [0u8; 2];
+            client.read_exact(&mut port).await?;
+            (
+                String::from_utf8(domain)?,
+                u16::from_be_bytes(port),
+            )
+        }
+        0x04 => { // IPv6
+            let mut addr = [0u8; 16];
+            client.read_exact(&mut addr).await?;
+            let mut port = [0u8; 2];
+            client.read_exact(&mut port).await?;
+            (
+                std::net::IpAddr::from(addr).to_string(),
+                u16::from_be_bytes(port),
+            )
+        }
+        _ => anyhow::bail!("Unsupported address type"),
     };
 
-    // Parse Port (Fixed 2 bytes, Big Endian)
-    let mut port_buf = [0u8; 2];
-    stream.read_exact(&mut port_buf).await?;
-    let port = u16::from_be_bytes(port_buf);
+    // -------------------------------
+    // Tor connection (Arti 0.39)
+    // -------------------------------
+    let mut tor_stream: Stream = tor
+        .connect((target.0.as_str(), target.1))
+        .await
+        .context("Tor connect failed")?;
 
-    debug!("SOCKS Proxy: Requesting connection to {}:{}", target_addr, port);
+    // SOCKS success response
+    client.write_all(&[
+        0x05, 0x00, 0x00, 0x01,
+        0, 0, 0, 0,
+        0, 0,
+    ]).await?;
 
-    // =============================================================
-    // PHASE 3: Tor Connection
-    // =============================================================
-    match tor_client.connect((target_addr.as_str(), port)).await {
-        Ok(tor_stream) => { // [FIX] Removed 'mut' here
-            // Reply: Success (0x00)
-            // BND.ADDR and BND.PORT are zeroed as we don't bind locally
-            stream.write_all(&[0x05, 0x00, 0x00, 0x01, 0,0,0,0, 0,0]).await?;
-            
-            // Bidirectional Data Copy
-            let (mut tr, mut tw) = tokio::io::split(tor_stream);
-            let (mut sr, mut sw) = stream.split();
-            
-            // Run until one side closes
-            let _ = tokio::join!(
-                tokio::io::copy(&mut sr, &mut tw),
-                tokio::io::copy(&mut tr, &mut sw)
-            );
-            Ok(())
-        },
-        Err(e) => {
-            error!("Tor connect failed for {}:{}: {}", target_addr, port, e);
-            write_error(&mut stream, 0x04).await?; // Host unreachable
-            bail!("Tor connection failed");
-        }
-    }
-}
+    // -------------------------------
+    // Bidirectional relay
+    // -------------------------------
+    let (mut cr, mut cw) = client.split();
+    let (mut tr, mut tw) = tokio::io::split(tor_stream);
 
-// Helper to send SOCKS5 error codes
-async fn write_error(stream: &mut TcpStream, code: u8) -> Result<()> {
-    // [VER, REP(code), RSV, ATYP, ADDR(0), PORT(0)]
-    let _ = stream.write_all(&[0x05, code, 0x00, 0x01, 0,0,0,0, 0,0]).await;
+    tokio::try_join!(
+        tokio::io::copy(&mut cr, &mut tw),
+        tokio::io::copy(&mut tr, &mut cw),
+    )?;
+
     Ok(())
 }
