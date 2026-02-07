@@ -7,10 +7,10 @@ edition = "2021"
 # === TLS / Crypto ===
 rustls = { version = "0.23", features = ["ring"] }
 
-# === Tor / Arti ===
-# We need tor-rtcompat to define the <R: Runtime> generic
-arti-client = { version = "0.39.0", default-features = false, features = ["tokio", "rustls"] }
-tor-rtcompat = { version = "0.39.0", features = ["tokio", "rustls"] }
+# === Tor / Arti (MODERN) ===
+# FIX: Added "static-sqlite" to bundle SQLite source instead of linking system lib.
+# Do NOT use the generic "static" feature, as that forces native-tls (OpenSSL).
+arti-client = { version = "0.39.0", default-features = false, features = ["tokio", "rustls", "static-sqlite"] }
 
 # === Async Runtime ===
 tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "signal", "time"] }
