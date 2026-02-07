@@ -8,7 +8,7 @@ mod hardening;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use std::sync::Arc;
+use std::{sync::Arc, fs};
 use tracing::{error, info, warn};
 
 use arti_client::{
@@ -17,8 +17,8 @@ use arti_client::{
     config::CfgPath,
 };
 
-// === [FIX] Import the Ring provider explicitly ===
-use rustls::crypto::ring; 
+// === Crypto provider (Ring) ===
+use rustls::crypto::ring;
 use tokio::signal;
 
 #[derive(Parser, Debug)]
@@ -34,7 +34,6 @@ async fn main() -> Result<()> {
     // ------------------------------------------------------------
     // 0. Install crypto provider (MUST be first)
     // ------------------------------------------------------------
-    // === [FIX] Call default_provider() to get the struct, then install it ===
     ring::default_provider()
         .install_default()
         .expect("Failed to install default crypto provider");
@@ -76,19 +75,42 @@ async fn main() -> Result<()> {
     info!("torrust zero-trust active. Mode: Embedded Arti");
 
     // ------------------------------------------------------------
-    // 4. Configure Embedded Tor (RAM-only, ephemeral)
+    // 4. Configure Embedded Tor (RAM-only, explicit tmpfs)
     // ------------------------------------------------------------
     info!("Configuring in-memory ephemeral Tor state");
 
+    // 🔐 Resolve state/cache dirs explicitly (NO implicit defaults)
+    let state_dir = std::env::var("XDG_DATA_HOME")
+        .unwrap_or_else(|_| "/var/lib/tor/state".to_string());
+
+    let cache_dir = std::env::var("XDG_CACHE_HOME")
+        .unwrap_or_else(|_| "/var/lib/tor/state".to_string());
+
+    info!("Tor state dir : {}", state_dir);
+    info!("Tor cache dir : {}", cache_dir);
+
+    // 🔐 MUST exist and be writable (tmpfs)
+    fs::create_dir_all(&state_dir)
+        .context("Tor state directory is not writable (tmpfs required)")?;
+    fs::create_dir_all(&cache_dir)
+        .context("Tor cache directory is not writable (tmpfs required)")?;
+
+    // 🔒 Lock down permissions (defense in depth)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700))?;
+        fs::set_permissions(&cache_dir, fs::Permissions::from_mode(0o700))?;
+    }
+
     let mut tor_cfg = TorClientConfig::builder();
 
-    // IMPORTANT:
-    // /var/lib/tor/state/state MUST already exist (created in Dockerfile)
     tor_cfg
         .storage()
-        .state_dir(CfgPath::new("/var/lib/tor/state".into()))
-        .cache_dir(CfgPath::new("/var/lib/tor/cache".into()))
-        // Required for containers + tmpfs
+        // ✅ EXPLICIT paths — no fallback to /
+        .state_dir(CfgPath::new(state_dir.into()))
+        .cache_dir(CfgPath::new(cache_dir.into()))
+        // Required for containers + tmpfs + non-root
         .permissions()
         .dangerously_trust_everyone();
 
