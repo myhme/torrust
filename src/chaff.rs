@@ -1,91 +1,56 @@
 // src/chaff.rs
 
-use rand::{seq::SliceRandom, thread_rng, Rng};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
 use tokio::time::sleep;
-use tracing::info;
+use tracing::{debug, info};
+use rand::Rng; // Import Rng trait
 
-use arti_client::{TorClient, DataStream};
+use arti_client::TorClient;
+use tor_rtcompat::Runtime;
 
 use crate::config::Config;
 
-/// Small pool of boring, static domains.
-/// These are intentionally:
-/// - popular
-/// - stable
-/// - HTTPS only
-/// - low JS / redirect complexity
-///
-/// The goal is NOT to mimic browsing,
-/// but to generate non-distinct Tor exit traffic.
-const CHAFF_DOMAINS: &[&str] = &[
-    "example.com",
-    "www.iana.org",
-    "www.rfc-editor.org",
-    "www.gnu.org",
+const CHAFF_TARGETS: &[(&str, u16)] = &[
+    ("www.google.com", 80),
+    ("www.cloudflare.com", 80),
+    ("www.microsoft.com", 80),
+    ("1.1.1.1", 80),
 ];
 
-/// Generate low-volume background Tor traffic ("chaff").
-///
-/// Properties:
-/// - Disabled by default
-/// - Boot-time randomness only
-/// - Very low volume
-/// - Wide timing jitter
-/// - No retries
-/// - No state
-///
-/// This is NOT meant to hide destinations.
-/// It only reduces timing confidence slightly.
-pub async fn start_background_noise(
-    tor: Arc<TorClient>,
-    _cfg: Config,
+pub async fn start_background_noise<R: Runtime>(
+    tor: Arc<TorClient<R>>, 
+    _cfg: Config, 
 ) {
-    info!("Chaff enabled: starting background noise task");
+    info!("Chaff traffic generator active");
 
-    // ------------------------------------------------------------
-    // Boot-time domain selection (stable per run)
-    // ------------------------------------------------------------
-    let domain = match CHAFF_DOMAINS.choose(&mut thread_rng()) {
-        Some(d) => *d,
-        None => return, // should never happen
-    };
-
-    let host = domain;
-    let port = 443;
+    // FIX: Do not create 'rng' here.
+    // ThreadRng is !Send and cannot be held across .await points.
 
     loop {
-        // ------------------------------------------------------------
-        // Wide timing jitter (prevents periodic patterns)
-        // ------------------------------------------------------------
-        let delay_secs = thread_rng().gen_range(30..120);
-        sleep(Duration::from_secs(delay_secs)).await;
+        // 1. Generate random values immediately (don't hold the handle)
+        let sleep_duration = rand::rng().random_range(120..600);
+        
+        debug!("Chaff: sleeping for {} seconds", sleep_duration);
+        
+        // The RNG handle is dropped here, so it's safe to await.
+        sleep(Duration::from_secs(sleep_duration)).await;
 
-        // ------------------------------------------------------------
-        // Best-effort Tor connection
-        // ------------------------------------------------------------
-        let mut stream: DataStream = match tor.connect((host, port)).await {
-            Ok(s) => s,
-            Err(_) => continue, // chaff must never fail loudly
-        };
+        // 2. Pick a random target
+        let target_idx = rand::rng().random_range(0..CHAFF_TARGETS.len());
+        let (host, port) = CHAFF_TARGETS[target_idx];
 
-        // ------------------------------------------------------------
-        // Minimal, low-entropy HTTPS request
-        // ------------------------------------------------------------
-        //
-        // - Single request
-        // - No cookies
-        // - No keep-alive
-        // - No redirects followed
-        //
-        let request = format!(
-            "GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-            host
-        );
+        debug!("Chaff: initiating connection to {}:{}", host, port);
 
-        let _ = stream.write_all(request.as_bytes()).await;
-        // Intentionally ignore all errors
+        // 3. Connect and discard
+        match tor.connect((host, port)).await {
+            Ok(stream) => {
+                drop(stream);
+                debug!("Chaff: connection success");
+            }
+            Err(e) => {
+                debug!("Chaff: connection failed (this is fine): {}", e);
+            }
+        }
     }
 }

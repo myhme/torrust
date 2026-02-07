@@ -7,15 +7,13 @@ edition = "2021"
 # === TLS / Crypto ===
 rustls = { version = "0.23", features = ["ring"] }
 
-# === Tor / Arti (MODERN) ===
-arti-client = { version = "0.39.0", default-features = false, features = ["tokio"] }
-
-# NOTE:
-# tor-rtcompat is NO LONGER required directly in 0.39
-# arti-client pulls the correct runtime internally
+# === Tor / Arti ===
+# We need tor-rtcompat to define the <R: Runtime> generic
+arti-client = { version = "0.39.0", default-features = false, features = ["tokio", "rustls"] }
+tor-rtcompat = { version = "0.39.0", features = ["tokio", "rustls"] }
 
 # === Async Runtime ===
-tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "signal"] }
+tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "signal", "time"] }
 futures = "0.3.31"
 
 # === Networking ===
