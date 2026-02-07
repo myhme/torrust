@@ -18,7 +18,7 @@ pub async fn start_socks_server<R: Runtime>(
     tor: Arc<TorClient<R>>,
     cfg: Config,
 ) -> Result<()> {
-    let bind_addr = SocketAddr::from(([127, 0, 0, 1], cfg.socks_port));
+    let bind_addr = SocketAddr::from(([10, 8, 0, 1], cfg.socks_port));
     let listener = TcpListener::bind(bind_addr)
         .await
         .context("Failed to bind SOCKS listener")?;
