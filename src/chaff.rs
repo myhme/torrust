@@ -1,56 +1,101 @@
-// src/chaff.rs
+//! chaff.rs
+//!
+//! Constant-rate Tor-native cover traffic.
+//! Reduces idle-time correlation and traffic-shape fingerprinting.
 
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::sleep;
-use tracing::{debug, info};
-use rand::Rng; // Import Rng trait
 
-use arti_client::TorClient;
+use arti_client::{TorClient, StreamPrefs};
+use arti_client::isolation::IsolationToken;
 use tor_rtcompat::Runtime;
 
-use crate::config::Config;
+use rand::{SeedableRng, random};
+use rand::rngs::SmallRng;
+use rand_distr::{Poisson, Distribution};
+use rand_distr::weighted::WeightedIndex;
 
-const CHAFF_TARGETS: &[(&str, u16)] = &[
-    ("www.google.com", 80),
-    ("www.cloudflare.com", 80),
-    ("www.microsoft.com", 80),
-    ("1.1.1.1", 80),
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::time::sleep;
+
+/// Number of concurrent cover streams
+const COVER_STREAMS: usize = 3;
+
+/// Average Poisson rate (events / second)
+const AVG_EVENTS_PER_SEC: f64 = 0.4;
+
+/// Fixed padding size (bytes)
+const PAD_SIZE: usize = 1024;
+
+/// Minimum delay to avoid tight retry loops
+const MIN_DELAY_SECS: f64 = 0.25;
+
+struct CoverTarget {
+    addr: &'static str,
+    weight: u8,
+}
+
+/// HTTPS-only popular onion services
+static COVER_TARGETS: &[CoverTarget] = &[
+    CoverTarget {
+        addr: "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion:443",
+        weight: 3,
+    },
+    CoverTarget {
+        addr: "protonmail.com.onion:443",
+        weight: 3,
+    },
+    CoverTarget {
+        addr: "nytimes3xbfgragh.onion:443",
+        weight: 2,
+    },
 ];
 
-pub async fn start_background_noise<R: Runtime>(
-    tor: Arc<TorClient<R>>, 
-    _cfg: Config, 
-) {
-    info!("Chaff traffic generator active");
+/// Entry point called from main.rs
+pub fn start_background_noise<R: Runtime>(tor: Arc<TorClient<R>>) {
+    let isolation = IsolationToken::new();
 
-    // FIX: Do not create 'rng' here.
-    // ThreadRng is !Send and cannot be held across .await points.
+    for _ in 0..COVER_STREAMS {
+        let tor = Arc::clone(&tor);
+        let isolation = isolation.clone();
+
+        tokio::spawn(async move {
+            cover_loop(tor, isolation).await;
+        });
+    }
+}
+
+async fn cover_loop<R: Runtime>(
+    tor: Arc<TorClient<R>>,
+    isolation: IsolationToken,
+) {
+    let poisson = Poisson::new(AVG_EVENTS_PER_SEC)
+        .expect("invalid Poisson rate");
+
+    let weights: Vec<u8> = COVER_TARGETS.iter().map(|t| t.weight).collect();
+    let chooser = WeightedIndex::new(&weights)
+        .expect("invalid cover target weights");
 
     loop {
-        // 1. Generate random values immediately (don't hold the handle)
-        let sleep_duration = rand::rng().random_range(120..600);
-        
-        debug!("Chaff: sleeping for {} seconds", sleep_duration);
-        
-        // The RNG handle is dropped here, so it's safe to await.
-        sleep(Duration::from_secs(sleep_duration)).await;
+        // ---- RNG (rand 0.9 correct, Send-safe) ----
+        let mut rng = SmallRng::seed_from_u64(random::<u64>());
 
-        // 2. Pick a random target
-        let target_idx = rand::rng().random_range(0..CHAFF_TARGETS.len());
-        let (host, port) = CHAFF_TARGETS[target_idx];
+        let delay = poisson.sample(&mut rng).max(MIN_DELAY_SECS);
+        let target = COVER_TARGETS[chooser.sample(&mut rng)].addr;
 
-        debug!("Chaff: initiating connection to {}:{}", host, port);
+        // ---- timing ----
+        sleep(Duration::from_secs_f64(delay)).await;
 
-        // 3. Connect and discard
-        match tor.connect((host, port)).await {
-            Ok(stream) => {
-                drop(stream);
-                debug!("Chaff: connection success");
-            }
-            Err(e) => {
-                debug!("Chaff: connection failed (this is fine): {}", e);
-            }
-        }
+        let mut prefs = StreamPrefs::new();
+        prefs.set_isolation(isolation.clone());
+
+        let mut stream = match tor.connect_with_prefs(target, &prefs).await {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        let mut buf = vec![0u8; PAD_SIZE];
+        let _ = stream.write_all(&buf).await;
+        let _ = stream.read(&mut buf).await;
     }
 }

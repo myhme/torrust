@@ -29,8 +29,12 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    ring::default_provider().install_default().expect("Failed to install crypto");
+    // ---- crypto provider ----
+    ring::default_provider()
+        .install_default()
+        .expect("Failed to install crypto provider");
 
+    // ---- logging ----
     tracing_subscriber::fmt()
         .with_target(false)
         .with_writer(std::io::stdout)
@@ -39,12 +43,15 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let cfg = config::load();
 
+    // ---- zero-trust hardening ----
     if cfg.strict_mode {
         info!("Strict zero-trust mode enabled");
+
         if let Err(e) = hardening::apply_protections(true) {
             error!("Security hardening failed: {e}");
             panic!("ABORT: strict mode requires hardened kernel");
         }
+
         if unsafe { libc::geteuid() } == 0 {
             panic!("ABORT: running as root violates zero-trust model");
         }
@@ -54,8 +61,11 @@ async fn main() -> Result<()> {
 
     info!("torrust zero-trust active. Mode: Embedded Arti");
 
-    fs::create_dir_all(&cfg.tor_state_dir).context("Tor state dir writable")?;
-    fs::create_dir_all(&cfg.tor_cache_dir).context("Tor cache dir writable")?;
+    // ---- filesystem hardening ----
+    fs::create_dir_all(&cfg.tor_state_dir)
+        .context("Tor state dir writable")?;
+    fs::create_dir_all(&cfg.tor_cache_dir)
+        .context("Tor cache dir writable")?;
 
     #[cfg(unix)]
     {
@@ -64,7 +74,9 @@ async fn main() -> Result<()> {
         fs::set_permissions(&cfg.tor_cache_dir, fs::Permissions::from_mode(0o700))?;
     }
 
+    // ---- Tor configuration ----
     info!("Configuring in-memory Tor state");
+
     let mut tor_cfg = TorClientConfig::builder();
     tor_cfg
         .storage()
@@ -73,9 +85,13 @@ async fn main() -> Result<()> {
         .permissions()
         .dangerously_trust_everyone();
 
-    let tor_cfg = tor_cfg.build().context("Failed to build Tor config")?;
+    let tor_cfg = tor_cfg
+        .build()
+        .context("Failed to build Tor config")?;
 
+    // ---- bootstrap Tor ----
     info!("Bootstrapping embedded Tor");
+
     let tor_client = TorClient::builder()
         .config(tor_cfg)
         .create_bootstrapped()
@@ -84,6 +100,7 @@ async fn main() -> Result<()> {
 
     let tor_client = Arc::new(tor_client);
 
+    // ---- selfcheck ----
     if args.selfcheck {
         info!("Self-check OK");
         std::process::exit(0);
@@ -91,9 +108,11 @@ async fn main() -> Result<()> {
 
     info!("Identity shielding active. Starting services");
 
+    // ---- SOCKS proxy ----
     {
         let tor = tor_client.clone();
         let cfg = cfg.clone();
+
         tokio::spawn(async move {
             if let Err(e) = proxy::start_socks_server(tor, cfg).await {
                 error!("CRITICAL: SOCKS server crashed: {e}");
@@ -101,9 +120,11 @@ async fn main() -> Result<()> {
         });
     }
 
+    // ---- DNS proxy ----
     {
         let tor = tor_client.clone();
         let cfg = cfg.clone();
+
         tokio::spawn(async move {
             if let Err(e) = dns::start_dns_server(tor, cfg).await {
                 error!("CRITICAL: DNS server crashed: {e}");
@@ -111,14 +132,16 @@ async fn main() -> Result<()> {
         });
     }
 
+    // ---- cover traffic (chaff) ----
     if cfg.chaff_enabled {
-        let tor = tor_client.clone();
-        let cfg = cfg.clone();
-        tokio::spawn(async move {
-            chaff::start_background_noise(tor, cfg).await;
-        });
+        // IMPORTANT:
+        // This is intentionally NOT async and NOT awaited.
+        // It spawns its own background tasks and must be
+        // behaviorally independent from user activity.
+        chaff::start_background_noise(tor_client.clone());
     }
 
+    // ---- shutdown handling ----
     match signal::ctrl_c().await {
         Ok(()) => info!("Shutdown signal received"),
         Err(e) => error!("Failed to listen for shutdown signal: {e}"),
