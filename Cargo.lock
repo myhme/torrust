@@ -4973,6 +4973,7 @@ dependencies = [
  "rustls",
  "thiserror 2.0.18",
  "tokio",
+ "tor-rtcompat",
  "tracing",
  "tracing-subscriber",
  "zeroize",

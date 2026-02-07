@@ -7,10 +7,12 @@ edition = "2021"
 # === TLS / Crypto ===
 rustls = { version = "0.23", features = ["ring"] }
 
-# === Tor / Arti (MODERN) ===
-# FIX: Added "static-sqlite" to bundle SQLite source instead of linking system lib.
-# Do NOT use the generic "static" feature, as that forces native-tls (OpenSSL).
+# === Tor / Arti ===
+# FIX 1: "static-sqlite" is required to build on Alpine/musl without system libs
 arti-client = { version = "0.39.0", default-features = false, features = ["tokio", "rustls", "static-sqlite"] }
+
+# FIX 2: "tor-rtcompat" is REQUIRED to import the `Runtime` trait used in your code
+tor-rtcompat = { version = "0.39.0", features = ["tokio", "rustls"] }
 
 # === Async Runtime ===
 tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "signal", "time"] }
