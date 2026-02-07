@@ -3,42 +3,31 @@
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
 use std::sync::Arc;
-
-use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info};
 
 use arti_client::{TorClient, DataStream};
-use arti_client::runtime::TokioRuntime;
 
 use crate::config::Config;
 
 // ------------------------------------------------------------
-// DNS resolver configuration
+// DNS resolver selection (boot-time, stable)
 // ------------------------------------------------------------
 
-// Small, conservative onion resolver pool.
-// Chosen ONCE at boot to avoid fingerprinting.
-const ONION_DNS_RESOLVERS: &[(&str, u16)] = &[
-    ("dnslb5r4i6c5w5o7.onion", 53),
-    ("resolver.dnscrypt.info.onion", 53),
-];
+// Primary: Tor-friendly onion DNS resolver
+// (chosen to avoid clearnet exits when possible)
+const ONION_DNS_RESOLVER: (&str, u16) =
+    ("dnslibertyvxk7q.onion", 53);
 
-// Single clearnet fallback.
-// Used ONLY if onion resolver fails.
-const FALLBACK_DNS_RESOLVER: (&str, u16) = ("1.1.1.1", 53);
+// Fallback: single well-known recursive resolver
+// Used ONLY if onion resolver fails
+const FALLBACK_DNS_RESOLVER: (&str, u16) =
+    ("1.1.1.1", 53);
 
-fn select_dns_resolver() -> (&'static str, u16) {
-    use rand::{thread_rng, Rng};
-
-    let mut rng = thread_rng();
-    let idx = rng.gen_range(0..ONION_DNS_RESOLVERS.len());
-    ONION_DNS_RESOLVERS[idx]
-}
-
-/// Start a TCP DNS proxy that forwards all queries over Tor
+/// Start a DNS-over-TCP proxy that forwards all queries over Tor
 pub async fn start_dns_server(
-    tor: Arc<TorClient<TokioRuntime>>,
+    tor: Arc<TorClient>,
     cfg: Config,
 ) -> Result<()> {
     let bind_addr = SocketAddr::from(([0, 0, 0, 0], cfg.dns_port));
@@ -46,13 +35,21 @@ pub async fn start_dns_server(
         .await
         .context("Failed to bind DNS listener")?;
 
-    // Resolver is chosen ONCE per boot
-    let resolver = select_dns_resolver();
+    info!("DNS proxy listening on {}", bind_addr);
 
-    info!(
-        "DNS proxy listening on {} (onion resolver selected)",
-        bind_addr
-    );
+    // ------------------------------------------------------------
+    // Resolver selection (once per boot)
+    // ------------------------------------------------------------
+    let resolver = match tor.connect(ONION_DNS_RESOLVER).await {
+        Ok(_) => {
+            info!("Using onion DNS resolver");
+            ONION_DNS_RESOLVER
+        }
+        Err(_) => {
+            info!("Onion resolver unavailable, using clearnet fallback");
+            FALLBACK_DNS_RESOLVER
+        }
+    };
 
     loop {
         let (socket, _) = listener.accept().await?;
@@ -69,7 +66,7 @@ pub async fn start_dns_server(
 
 async fn handle_dns_connection(
     mut client: TcpStream,
-    tor: Arc<TorClient<TokioRuntime>>,
+    tor: Arc<TorClient>,
     resolver: (&str, u16),
 ) -> Result<()> {
     // ------------------------------------------------------------
@@ -87,18 +84,12 @@ async fn handle_dns_connection(
     client.read_exact(&mut dns_msg).await?;
 
     // ------------------------------------------------------------
-    // Forward DNS request over Tor (TCP)
-    // Onion-first, single fallback
+    // Forward DNS request over Tor
     // ------------------------------------------------------------
-    let mut tor_stream: DataStream = match tor.connect(resolver).await {
-        Ok(s) => s,
-        Err(_) => {
-            // Single, non-rotating fallback
-            tor.connect(FALLBACK_DNS_RESOLVER)
-                .await
-                .context("Tor DNS fallback connect failed")?
-        }
-    };
+    let mut tor_stream: DataStream = tor
+        .connect(resolver)
+        .await
+        .context("Tor DNS connect failed")?;
 
     // DNS-over-TCP framing
     tor_stream.write_all(&len_buf).await?;

@@ -1,99 +1,91 @@
 // src/chaff.rs
 
-use rand::{thread_rng, Rng};
+use rand::{seq::SliceRandom, thread_rng, Rng};
 use std::sync::Arc;
 use std::time::Duration;
-
 use tokio::io::AsyncWriteExt;
 use tokio::time::sleep;
 use tracing::info;
 
 use arti_client::{TorClient, DataStream};
-use arti_client::runtime::TokioRuntime;
 
 use crate::config::Config;
 
-// -----------------------------------------------------------------------------
-// Chaff targets
-// -----------------------------------------------------------------------------
-//
-// Very small pool of boring, globally common, low-complexity HTTPS targets.
-// One target is selected ONCE per process lifetime to avoid fingerprinting.
-//
-const CHAFF_TARGETS: &[(&str, u16, &str)] = &[
-    ("example.com", 443, "/"),
-    ("example.net", 443, "/"),
-    ("iana.org", 443, "/domains/reserved"),
+/// Small pool of boring, static domains.
+/// These are intentionally:
+/// - popular
+/// - stable
+/// - HTTPS only
+/// - low JS / redirect complexity
+///
+/// The goal is NOT to mimic browsing,
+/// but to generate non-distinct Tor exit traffic.
+const CHAFF_DOMAINS: &[&str] = &[
+    "example.com",
+    "www.iana.org",
+    "www.rfc-editor.org",
+    "www.gnu.org",
 ];
 
-fn select_chaff_target() -> (&'static str, u16, &'static str) {
-    let mut rng = thread_rng();
-    let idx = rng.gen_range(0..CHAFF_TARGETS.len());
-    CHAFF_TARGETS[idx]
-}
-
-/// Generate low-volume background traffic over Tor.
+/// Generate low-volume background Tor traffic ("chaff").
 ///
-/// SECURITY MODEL:
-/// - Optional, disabled by default
-/// - No persistence
+/// Properties:
+/// - Disabled by default
+/// - Boot-time randomness only
+/// - Very low volume
+/// - Wide timing jitter
 /// - No retries
-/// - No adaptation
-/// - No per-request randomness (only timing jitter)
+/// - No state
 ///
-/// PURPOSE:
-/// - Mask idle periods
-/// - Reduce timing confidence
-/// - NOT to imitate real browsing
+/// This is NOT meant to hide destinations.
+/// It only reduces timing confidence slightly.
 pub async fn start_background_noise(
-    tor: Arc<TorClient<TokioRuntime>>,
+    tor: Arc<TorClient>,
     _cfg: Config,
 ) {
-    let (host, port, path) = select_chaff_target();
+    info!("Chaff enabled: starting background noise task");
 
-    info!("Chaff enabled: background noise active");
+    // ------------------------------------------------------------
+    // Boot-time domain selection (stable per run)
+    // ------------------------------------------------------------
+    let domain = match CHAFF_DOMAINS.choose(&mut thread_rng()) {
+        Some(d) => *d,
+        None => return, // should never happen
+    };
+
+    let host = domain;
+    let port = 443;
 
     loop {
-        // ---------------------------------------------------------------------
-        // Wide timing jitter (prevents periodic signatures)
-        // ---------------------------------------------------------------------
-        //
-        // Chaff must be sparse and irregular.
-        // Tight intervals are fingerprintable.
-        //
-        let delay_secs = thread_rng().gen_range(45..180);
+        // ------------------------------------------------------------
+        // Wide timing jitter (prevents periodic patterns)
+        // ------------------------------------------------------------
+        let delay_secs = thread_rng().gen_range(30..120);
         sleep(Duration::from_secs(delay_secs)).await;
 
-        // ---------------------------------------------------------------------
+        // ------------------------------------------------------------
         // Best-effort Tor connection
-        // ---------------------------------------------------------------------
-        //
-        // Failures are ignored completely.
-        // Chaff must never affect availability or shutdown.
-        //
+        // ------------------------------------------------------------
         let mut stream: DataStream = match tor.connect((host, port)).await {
             Ok(s) => s,
-            Err(_) => continue,
+            Err(_) => continue, // chaff must never fail loudly
         };
 
-        // ---------------------------------------------------------------------
-        // Minimal, static HTTP request
-        // ---------------------------------------------------------------------
+        // ------------------------------------------------------------
+        // Minimal, low-entropy HTTPS request
+        // ------------------------------------------------------------
         //
-        // - Fixed headers
-        // - No User-Agent
+        // - Single request
         // - No cookies
-        // - No redirects
-        // - No JS
-        //
-        // TLS fingerprinting is handled by Tor itself.
+        // - No keep-alive
+        // - No redirects followed
         //
         let request = format!(
-            "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-            path, host
+            "GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            host
         );
 
-        // Ignore all I/O errors
         let _ = stream.write_all(request.as_bytes()).await;
+        // Intentionally ignore all errors
     }
 }
