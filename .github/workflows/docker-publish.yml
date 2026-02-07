@@ -73,7 +73,7 @@ jobs:
 
       - name: Install Cosign
         if: github.event_name != 'workflow_dispatch' || inputs.dry_run != true
-        uses: sigstore/cosign-installer@v3.4.0
+        uses: sigstore/cosign-installer@v4.0.0
 
       - name: Sign Image
         if: github.event_name != 'workflow_dispatch' || inputs.dry_run != true
