@@ -1,54 +1,63 @@
 // src/hardening.rs
+//
+// Process-level hardening only.
+// No network effects, no timing effects, no Tor behavior changes.
+// Designed for untrusted VPS / container environments.
 
-use anyhow::{Result}; // Removed unused Context
-use libc;
-use rlimit::Resource;
+use anyhow::{Context, Result};
 use tracing::info;
 
+#[cfg(unix)]
+use libc::{
+    prctl,
+    PR_SET_DUMPABLE,
+    PR_SET_NO_NEW_PRIVS,
+};
+
+#[cfg(unix)]
+use rlimit::Resource;
+
+/// Apply zero-trust process protections.
+///
+/// If `strict` is true:
+/// - failure is fatal
+/// - assumes hostile host
+///
+/// If `strict` is false:
+/// - best-effort only
 pub fn apply_protections(strict: bool) -> Result<()> {
-    info!("Applying process hardening");
+    #[cfg(unix)]
+    {
+        // ------------------------------------------------------------
+        // 1. Disable core dumps (prevents memory exfil via crashes)
+        // ------------------------------------------------------------
+        rlimit::setrlimit(Resource::CORE, 0, 0)
+            .context("Failed to disable core dumps")?;
 
-    // 1. Lock memory
-    unsafe {
-        if libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE) != 0 {
-            let err = std::io::Error::last_os_error();
-            if strict {
-                anyhow::bail!("mlockall failed: {}", err);
-            }
+        // ------------------------------------------------------------
+        // 2. Disable ptrace & debugger attachment
+        // ------------------------------------------------------------
+        let ret = unsafe { prctl(PR_SET_DUMPABLE, 0) };
+        if ret != 0 && strict {
+            anyhow::bail!("Failed to disable dumpability");
         }
-    }
 
-    // 2. Disable core dumps (API Fix: use explicit u64/Limit)
-    if let Err(e) = Resource::CORE.set(0, 0) {
-        if strict {
-            anyhow::bail!("Failed to disable core dumps: {}", e);
+        // ------------------------------------------------------------
+        // 3. Enforce no-new-privileges
+        // ------------------------------------------------------------
+        let ret = unsafe { prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+        if ret != 0 && strict {
+            anyhow::bail!("Failed to set no_new_privs");
         }
-    }
 
-    // 3. Restrict number of open files
-    let nofile_limit = 65536;
-    if let Err(e) = Resource::NOFILE.set(nofile_limit, nofile_limit) {
-        if strict {
-            anyhow::bail!("Failed to set NOFILE limit: {}", e);
-        }
-    }
+        // ------------------------------------------------------------
+        // 4. Reduce accidental resource abuse
+        // ------------------------------------------------------------
+        rlimit::setrlimit(Resource::FSIZE, 0, 0)
+            .context("Failed to restrict file write size")?;
 
-    // 4. Set dumpable flag to 0
-    unsafe {
-        if libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) != 0 {
-            let err = std::io::Error::last_os_error();
-            if strict {
-                anyhow::bail!("prctl(PR_SET_DUMPABLE) failed: {}", err);
-            }
-        }
-    }
-
-    // 5. Optional: lock address space growth
-    // Rlimit::INFINITY is now Resource::INFINITY
-    if let Err(e) = Resource::AS.set(rlimit::INFINITY, rlimit::INFINITY) {
-        if strict {
-            anyhow::bail!("Failed to set AS limit: {}", e);
-        }
+        rlimit::setrlimit(Resource::NPROC, 0, 0)
+            .context("Failed to restrict process spawning")?;
     }
 
     info!("Process hardening applied");

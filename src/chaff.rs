@@ -1,7 +1,10 @@
 //! chaff.rs
 //!
-//! Constant-rate Tor-native cover traffic.
-//! Reduces idle-time correlation and traffic-shape fingerprinting.
+//! OPTIONAL constant-rate cover traffic.
+//! Designed to be BORING and NON-UNIQUE.
+//!
+//! Tor already provides padding and circuit rotation.
+//! This should only be enabled if you fully understand the tradeoffs.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,92 +13,41 @@ use arti_client::{TorClient, StreamPrefs};
 use arti_client::isolation::IsolationToken;
 use tor_rtcompat::Runtime;
 
-use rand::{SeedableRng, random};
-use rand::rngs::SmallRng;
-use rand_distr::{Poisson, Distribution};
-use rand_distr::weighted::WeightedIndex;
-
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::sleep;
 
-/// Number of concurrent cover streams
-const COVER_STREAMS: usize = 3;
-
-/// Average Poisson rate (events / second)
-const AVG_EVENTS_PER_SEC: f64 = 0.4;
+/// Fixed interval between cover connections
+/// (Long enough to avoid churn, short enough to avoid idle gaps)
+const INTERVAL: Duration = Duration::from_secs(60);
 
 /// Fixed padding size (bytes)
 const PAD_SIZE: usize = 1024;
 
-/// Minimum delay to avoid tight retry loops
-const MIN_DELAY_SECS: f64 = 0.25;
-
-struct CoverTarget {
-    addr: &'static str,
-    weight: u8,
-}
-
-/// HTTPS-only popular onion services
-static COVER_TARGETS: &[CoverTarget] = &[
-    CoverTarget {
-        addr: "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion:443",
-        weight: 3,
-    },
-    CoverTarget {
-        addr: "protonmail.com.onion:443",
-        weight: 3,
-    },
-    CoverTarget {
-        addr: "nytimes3xbfgragh.onion:443",
-        weight: 2,
-    },
-];
+/// Single, stable, popular onion service
+/// (No rotation, no weights, no randomness)
+const COVER_TARGET: &str =
+    "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion:443";
 
 /// Entry point called from main.rs
 pub fn start_background_noise<R: Runtime>(tor: Arc<TorClient<R>>) {
-    let isolation = IsolationToken::new();
+    tokio::spawn(async move {
+        loop {
+            sleep(INTERVAL).await;
 
-    for _ in 0..COVER_STREAMS {
-        let tor = Arc::clone(&tor);
-        let isolation = isolation.clone();
+            // New isolation per cover stream
+            let mut prefs = StreamPrefs::new();
+            prefs.set_isolation(IsolationToken::new());
 
-        tokio::spawn(async move {
-            cover_loop(tor, isolation).await;
-        });
-    }
-}
+            let mut stream = match tor.connect_with_prefs(COVER_TARGET, &prefs).await {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
 
-async fn cover_loop<R: Runtime>(
-    tor: Arc<TorClient<R>>,
-    isolation: IsolationToken,
-) {
-    let poisson = Poisson::new(AVG_EVENTS_PER_SEC)
-        .expect("invalid Poisson rate");
+            let mut buf = vec![0u8; PAD_SIZE];
 
-    let weights: Vec<u8> = COVER_TARGETS.iter().map(|t| t.weight).collect();
-    let chooser = WeightedIndex::new(&weights)
-        .expect("invalid cover target weights");
-
-    loop {
-        // ---- RNG (rand 0.9 correct, Send-safe) ----
-        let mut rng = SmallRng::seed_from_u64(random::<u64>());
-
-        let delay = poisson.sample(&mut rng).max(MIN_DELAY_SECS);
-        let target = COVER_TARGETS[chooser.sample(&mut rng)].addr;
-
-        // ---- timing ----
-        sleep(Duration::from_secs_f64(delay)).await;
-
-        let mut prefs = StreamPrefs::new();
-        prefs.set_isolation(isolation.clone());
-
-        let mut stream = match tor.connect_with_prefs(target, &prefs).await {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-
-        let mut buf = vec![0u8; PAD_SIZE];
-        let _ = stream.write_all(&buf).await;
-        let _ = stream.read(&mut buf).await;
-    }
+            // Minimal, symmetric I/O
+            let _ = stream.write_all(&buf).await;
+            let _ = stream.read(&mut buf).await;
+        }
+    });
 }
