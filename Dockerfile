@@ -33,7 +33,7 @@ RUN cargo build --release --target ${TARGET_ARCH}
 COPY src ./src
 
 # Static, stripped, reproducible
-RUN RUSTFLAGS="-C target-feature=+crt-static -C strip=symbols" \
+RUN RUSTFLAGS="-C target-feature=+crt-static -C link-args=-fstack-protector-all -C strip=symbols" \
     cargo build --release --target ${TARGET_ARCH}
 
 # ================================
