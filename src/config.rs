@@ -12,7 +12,6 @@ use tracing::info;
 pub struct Config {
     // Network exposure (explicit, minimal)
     pub socks_port: u16,
-    pub dns_port: u16,
 
     // Security posture
     pub strict_mode: bool,
@@ -36,11 +35,6 @@ pub fn load() -> Config {
         .unwrap_or_else(|_| "9150".to_string())
         .parse()
         .expect("Invalid SOCKS port");
-
-    let dns_port = env::var("COMMON_DNS_PROXY_PORT")
-        .unwrap_or_else(|_| "5353".to_string())
-        .parse()
-        .expect("Invalid DNS port");
 
     // ------------------------------------------------------------
     // Security posture
@@ -70,7 +64,6 @@ pub fn load() -> Config {
 
     let cfg = Config {
         socks_port,
-        dns_port,
         strict_mode,
         chaff_enabled,
         tor_state_dir,
@@ -81,9 +74,8 @@ pub fn load() -> Config {
     // Do not log "paranoid", percentages, or behavioral knobs.
     // Logging those alone makes the node unique.
     info!(
-        "Config loaded: SOCKS={}, DNS={}, Strict={}, Chaff={}",
+        "Config loaded: SOCKS={}, Strict={}, Chaff={}",
         cfg.socks_port,
-        cfg.dns_port,
         cfg.strict_mode,
         cfg.chaff_enabled,
     );

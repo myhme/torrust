@@ -6,7 +6,6 @@
 
 mod config;
 mod proxy;
-mod dns;
 mod chaff;
 mod hardening;
 
@@ -138,20 +137,6 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             if let Err(e) = proxy::start_socks_server(tor, cfg).await {
                 error!("SOCKS server terminated: {e}");
-            }
-        });
-    }
-
-    // ------------------------------------------------------------
-    // DNS proxy (optional; safe to disable entirely)
-    // ------------------------------------------------------------
-    {
-        let tor = tor_client.clone();
-        let cfg = cfg.clone();
-
-        tokio::spawn(async move {
-            if let Err(e) = dns::start_dns_server(tor, cfg).await {
-                error!("DNS server terminated: {e}");
             }
         });
     }
