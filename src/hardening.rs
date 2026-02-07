@@ -53,8 +53,8 @@ pub fn apply_protections(strict: bool) -> Result<()> {
         // ------------------------------------------------------------
         // 4. Reduce accidental resource abuse
         // ------------------------------------------------------------
-        rlimit::setrlimit(Resource::FSIZE, 0, 0)
-            .context("Failed to restrict file write size")?;
+		rlimit::setrlimit(Resource::FSIZE, u64::MAX, u64::MAX)
+			.context("Failed to lift file write size limit")?;
 
         rlimit::setrlimit(Resource::NPROC, 0, 0)
             .context("Failed to restrict process spawning")?;
