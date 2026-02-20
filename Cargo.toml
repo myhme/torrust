@@ -6,16 +6,16 @@ edition = "2021"
 [dependencies]
 # === TLS / Crypto ===
 rustls = { version = "0.23", features = ["ring"] }
+tokio-rustls = "0.26"
+rustls-pemfile = "2.1"
+rustls-pki-types = "1.4"
 
 # === Tor / Arti ===
-# FIX 1: "static-sqlite" is required to build on Alpine/musl without system libs
 arti-client = { version = "0.39.0", default-features = false, features = ["tokio", "rustls", "static-sqlite"] }
-
-# FIX 2: "tor-rtcompat" is REQUIRED to import the `Runtime` trait used in your code
 tor-rtcompat = { version = "0.39.0", features = ["tokio", "rustls"] }
 
 # === Async Runtime ===
-tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "signal", "time"] }
+tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "signal", "time", "net", "io-util"] }
 futures = "0.3.31"
 
 # === Networking ===

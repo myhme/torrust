@@ -1,0 +1,69 @@
+
+Pre-Launch Operations
+1. Create the Host RAM Disk (On the VPS):
+Before running docker compose up, execute this on the server:
+
+Bash
+sudo mkdir -p /mnt/ramdisk_certs
+sudo mount -t tmpfs -o size=1M,mode=0700 tmpfs /mnt/ramdisk_certs
+sudo chown -R 10001:10001 /mnt/ramdisk_certs
+2. Generate Keys (From vps):
+
+. Generate the keys directly into the RAM disk (using sudo):
+
+Bash
+sudo openssl req -x509 -newkey rsa:4096 -keyout /mnt/ramdisk_certs/tls.key -out /mnt/ramdisk_certs/tls.crt -sha256 -days 3650 -nodes -subj "/CN=torrust-secure"
+2. Lock the permissions to the Docker user (10001):
+
+Bash
+sudo chown 10001:10001 /mnt/ramdisk_certs/tls.key /mnt/ramdisk_certs/tls.crt
+3. Verify it worked:
+
+Bash
+ls -l /mnt/ramdisk_certs/
+
+
+
+3. Configure stunnel (On your Laptop):
+Create an stunnel.conf file:
+
+Ini, TOML
+[torrust-secure]
+client = yes
+accept = 127.0.0.1:1080
+connect = 10.8.0.1:9150
+verifyChain = yes
+CAfile = /path/to/your/laptop/tls.crt
+Run stunnel and set FoxyProxy to 127.0.0.1:1080 (SOCKS5). The proxy is now mathematically sealed.
+
+
+
+
+Final Deployment Checklist
+To get your hardened SOCKS5-over-TLS proxy running, follow these final steps:
+
+Mount the RAM Disk (if not already done):
+Ensure the volatile "shelf" for your keys is active on the VPS:
+
+Bash
+sudo mkdir -p /mnt/ramdisk_certs
+sudo mount -t tmpfs -o size=1M,mode=0700 tmpfs /mnt/ramdisk_certs
+sudo chown -R 10001:10001 /mnt/ramdisk_certs
+Verify the Keys:
+Check that your certificates are in place and have the correct ownership:
+
+Bash
+ls -l /mnt/ramdisk_certs/
+(You should see tls.crt and tls.key owned by 10001).
+
+Start the Container:
+Run your updated docker-compose.yml:
+
+Bash
+docker compose up -d --build
+Connect from your Laptop:
+Start your stunnel (or preferred TLS wrapper) on your Windows machine to bridge the connection:
+
+stunnel config: Point connect = 10.8.0.1:9150.
+
+FoxyProxy: Point to your local stunnel address (e.g., 127.0.0.1:1080).

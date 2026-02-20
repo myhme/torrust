@@ -30,3 +30,8 @@ services:
         tmpfs:
           size: 16m
           mode: 1777
+      # This "bind" mount links the Host RAM to the Container RAM
+      - type: bind
+        source: /mnt/ramdisk_certs
+        target: /etc/torrust/certs
+        read_only: true
