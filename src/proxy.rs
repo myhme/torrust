@@ -47,16 +47,23 @@ pub async fn start_socks_server<R: Runtime>(
     tracing::info!("SOCKS5-over-TLS proxy listening on {}", bind_addr);
 
     loop {
-        let (socket, _) = listener.accept().await?;
+        let (socket, peer_addr) = listener.accept().await?;
+        
+        // CRITICAL: Prevent TCP Nagle deadlocks that freeze the browser
+        if let Err(e) = socket.set_nodelay(true) {
+            tracing::warn!("Failed to set TCP_NODELAY: {}", e);
+        }
+        
         let tor = tor.clone();
         let acceptor = tls_acceptor.clone();
 
         tokio::spawn(async move {
             match acceptor.accept(socket).await {
                 Ok(tls_stream) => {
+                    tracing::info!("TLS connection established from {}", peer_addr);
                     let _ = handle_socks_connection(tls_stream, tor).await;
                 }
-                Err(e) => tracing::debug!("TLS handshake failed: {}", e),
+                Err(e) => tracing::warn!("TLS handshake failed from {}: {}", peer_addr, e),
             }
         });
     }
@@ -69,9 +76,9 @@ async fn handle_socks_connection<R: Runtime, S>(
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
-    let handshake_result = timeout(Duration::from_secs(5), async {
+    let handshake_result = timeout(Duration::from_secs(10), async {
         let mut header = [0u8; 2];
-        client.read_exact(&mut header).await?;
+        client.read_exact(&mut header).await.context("Failed to read SOCKS header")?;
 
         if header[0] != 0x05 {
             header.zeroize();
@@ -81,24 +88,27 @@ where
 
         let nmethods = header[1] as usize;
         let mut methods = vec![0u8; nmethods];
-        client.read_exact(&mut methods).await?;
+        client.read_exact(&mut methods).await.context("Failed to read SOCKS methods")?;
 
         if !methods.contains(&0x00) {
             methods.zeroize();
             let _ = client.write_all(&[0x05, 0xFF]).await;
-            let _ = client.flush().await; // FORCE FLUSH
+            let _ = client.flush().await; 
             return Err(anyhow::anyhow!("No allowed auth methods"));
         }
         methods.zeroize();
+        
+        // Send auth success (The first 2 bytes)
         client.write_all(&[0x05, 0x00]).await?;
-        client.flush().await?; // FORCE FLUSH TO BROWSER
+        client.flush().await?; 
 
+        // Read connect request
         let mut req = [0u8; 4];
-        client.read_exact(&mut req).await?;
+        client.read_exact(&mut req).await.context("Failed to read SOCKS connect request")?;
 
         if req[0] != 0x05 || req[1] != 0x01 {
             req.zeroize();
-            return Err(anyhow::anyhow!("Invalid command"));
+            return Err(anyhow::anyhow!("Invalid SOCKS command"));
         }
         req.zeroize();
 
@@ -130,7 +140,7 @@ where
                 
                 (domain_str, port_num)
             }
-            _ => return Err(anyhow::anyhow!("Unsupported address type")),
+            _ => return Err(anyhow::anyhow!("Unsupported SOCKS address type")),
         };
 
         Ok((host, port))
@@ -138,11 +148,19 @@ where
 
     let (mut host, port) = match handshake_result {
         Ok(Ok(res)) => res,
-        _ => {
+        Ok(Err(e)) => {
+            tracing::warn!("SOCKS Protocol Error: {:#}", e);
+            let _ = reply_failure(&mut client).await;
+            return Ok(());
+        }
+        Err(_) => {
+            tracing::warn!("SOCKS Handshake Timeout");
             let _ = reply_failure(&mut client).await;
             return Ok(());
         }
     };
+
+    tracing::info!("SOCKS valid. Routing {}:{} through Tor...", host, port);
 
     let mut prefs = StreamPrefs::new();
     prefs.set_isolation(IsolationToken::new());
@@ -151,15 +169,20 @@ where
     host.zeroize(); 
 
     let tor_stream: DataStream = match tor_stream_result {
-        Ok(stream) => stream,
-        Err(_) => {
+        Ok(stream) => {
+            tracing::info!("Successfully established Tor circuit");
+            stream
+        }
+        Err(e) => {
+            // IF WIREGUARD HAS NO INTERNET, THIS WILL TRIGGER (And send the final 10 bytes)
+            tracing::warn!("Tor failed to route to target: {}", e);
             let _ = reply_failure(&mut client).await;
             return Ok(());
         }
     };
 
     let _ = client.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
-    let _ = client.flush().await; // FORCE FLUSH SUCCESS 
+    let _ = client.flush().await; 
 
     let (cr, cw) = tokio::io::split(client);
     let (tr, tw) = tokio::io::split(tor_stream);
@@ -168,7 +191,8 @@ where
         zeroizing_copy(cr, tw),
         zeroizing_copy(tr, cw),
     );
-
+    
+    tracing::info!("Connection closed cleanly.");
     Ok(())
 }
 
@@ -185,7 +209,7 @@ where
             Err(e) => return Err(e.into()),
         };
         let _ = writer.write_all(&buf[..n]).await;
-        let _ = writer.flush().await; // PREVENT STALLING ON WEBSITES
+        let _ = writer.flush().await; 
         buf[..n].zeroize(); 
     }
     buf.zeroize();
