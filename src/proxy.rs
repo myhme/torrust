@@ -1,9 +1,12 @@
 // src/proxy.rs
 use anyhow::{Context, Result};
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 use std::io::BufReader;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -19,6 +22,9 @@ use tokio_rustls::TlsAcceptor;
 use rustls_pemfile::{certs, private_key};
 
 use crate::config::Config;
+
+// Thread-safe map to link hashed credentials to specific Tor circuits
+type IsolationMap = Arc<Mutex<HashMap<u64, IsolationToken>>>;
 
 pub async fn start_socks_server<R: Runtime>(
     tor: Arc<TorClient<R>>,
@@ -44,7 +50,11 @@ pub async fn start_socks_server<R: Runtime>(
         .await
         .context("Failed to bind SOCKS listener")?;
 
-    tracing::info!("SOCKS5-over-TLS proxy listening on {}", bind_addr);
+    // Create the global circuit isolation map and a default token for unauthenticated streams
+    let isolation_map: IsolationMap = Arc::new(Mutex::new(HashMap::new()));
+    let default_token = IsolationToken::new();
+
+    tracing::info!("SOCKS5-over-TLS proxy listening on {} (IsolateSOCKSAuth enabled)", bind_addr);
 
     loop {
         let (socket, peer_addr) = listener.accept().await?;
@@ -55,12 +65,14 @@ pub async fn start_socks_server<R: Runtime>(
         
         let tor = tor.clone();
         let acceptor = tls_acceptor.clone();
+        let iso_map = isolation_map.clone();
+        let def_token = default_token.clone();
 
         tokio::spawn(async move {
             match acceptor.accept(socket).await {
                 Ok(tls_stream) => {
                     tracing::debug!("TLS connection established from {}", peer_addr);
-                    let _ = handle_socks_connection(tls_stream, tor).await;
+                    let _ = handle_socks_connection(tls_stream, tor, iso_map, def_token).await;
                 }
                 Err(e) => tracing::warn!("TLS handshake failed from {}: {}", peer_addr, e),
             }
@@ -71,6 +83,8 @@ pub async fn start_socks_server<R: Runtime>(
 async fn handle_socks_connection<R: Runtime, S>(
     mut client: S,
     tor: Arc<TorClient<R>>,
+    isolation_map: IsolationMap,
+    default_token: IsolationToken,
 ) -> Result<()>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
@@ -89,12 +103,11 @@ where
         let mut methods = vec![0u8; nmethods];
         client.read_exact(&mut methods).await.context("Failed to read SOCKS methods")?;
 
-        // Support both "No Auth" (0x00) and "Username/Password" (0x02) for circuit isolation
         let mut auth_method = 0xFF;
         if methods.contains(&0x00) {
             auth_method = 0x00;
         } else if methods.contains(&0x02) {
-            auth_method = 0x02;
+            auth_method = 0x02; 
         }
 
         if auth_method == 0xFF {
@@ -105,13 +118,14 @@ where
         }
         methods.zeroize();
         
-        // 1. Send method selection
         client.write_all(&[0x05, auth_method]).await?;
         client.flush().await?; 
 
-        // 2. Handle Username/Password subnegotiation if requested
+        let mut cred_hash: Option<u64> = None;
+
+        // ISOLATESOCKSAUTH LOGIC
         if auth_method == 0x02 {
-            let mut auth_ver = [0u8; 2]; // VER + ULEN
+            let mut auth_ver = [0u8; 2];
             client.read_exact(&mut auth_ver).await.context("Failed to read Auth VER/ULEN")?;
             
             let ulen = auth_ver[1] as usize;
@@ -125,18 +139,22 @@ where
             let mut passwd = vec![0u8; plen];
             client.read_exact(&mut passwd).await.context("Failed to read Password")?;
 
-            // Zeroize credentials from memory immediately
+            // Generate a mathematical hash of the credentials to act as the circuit ID
+            let mut hasher = DefaultHasher::new();
+            uname.hash(&mut hasher);
+            passwd.hash(&mut hasher);
+            cred_hash = Some(hasher.finish());
+
+            // INSTANT DESTRUCTION of real metadata
             auth_ver.zeroize();
             uname.zeroize();
             plen_buf.zeroize();
             passwd.zeroize();
 
-            // Send Auth Success (VER: 0x01, STATUS: 0x00)
             client.write_all(&[0x01, 0x00]).await?;
             client.flush().await?;
         }
 
-        // 3. Read connect request
         let mut req = [0u8; 4];
         client.read_exact(&mut req).await.context("Failed to read SOCKS connect request")?;
 
@@ -177,10 +195,10 @@ where
             _ => return Err(anyhow::anyhow!("Unsupported SOCKS address type")),
         };
 
-        Ok((host, port))
+        Ok((host, port, cred_hash))
     }).await;
 
-    let (mut host, port) = match handshake_result {
+    let (mut host, port, cred_hash) = match handshake_result {
         Ok(Ok(res)) => res,
         Ok(Err(e)) => {
             tracing::warn!("SOCKS Protocol Error: {:#}", e);
@@ -194,12 +212,24 @@ where
         }
     };
 
+    // Apply the circuit isolation logic
+    let stream_token = match cred_hash {
+        Some(hash) => {
+            let mut map = isolation_map.lock().unwrap();
+            // Prevent RAM leaks from aggressive browser tracking
+            if map.len() > 1000 {
+                tracing::info!("Circuit map full. Purging ephemeral circuits.");
+                map.clear();
+            }
+            map.entry(hash).or_insert_with(IsolationToken::new).clone()
+        }
+        None => default_token,
+    };
+
     tracing::info!("SOCKS valid. Routing {}:{} through Tor...", host, port);
 
-    // We generate a new isolation token for every single request anyway, 
-    // guaranteeing privacy regardless of browser behavior.
     let mut prefs = StreamPrefs::new();
-    prefs.set_isolation(IsolationToken::new());
+    prefs.set_isolation(stream_token);
 
     let tor_stream_result = tor.connect_with_prefs((host.as_str(), port), &prefs).await;
     host.zeroize(); 
