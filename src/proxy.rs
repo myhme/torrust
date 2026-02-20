@@ -23,7 +23,6 @@ use rustls_pemfile::{certs, private_key};
 
 use crate::config::Config;
 
-// Thread-safe map to link hashed credentials to specific Tor circuits
 type IsolationMap = Arc<Mutex<HashMap<u64, IsolationToken>>>;
 
 pub async fn start_socks_server<R: Runtime>(
@@ -50,7 +49,6 @@ pub async fn start_socks_server<R: Runtime>(
         .await
         .context("Failed to bind SOCKS listener")?;
 
-    // Create the global circuit isolation map and a default token for unauthenticated streams
     let isolation_map: IsolationMap = Arc::new(Mutex::new(HashMap::new()));
     let default_token = IsolationToken::new();
 
@@ -71,7 +69,6 @@ pub async fn start_socks_server<R: Runtime>(
         tokio::spawn(async move {
             match acceptor.accept(socket).await {
                 Ok(tls_stream) => {
-                    tracing::debug!("TLS connection established from {}", peer_addr);
                     let _ = handle_socks_connection(tls_stream, tor, iso_map, def_token).await;
                 }
                 Err(e) => tracing::warn!("TLS handshake failed from {}: {}", peer_addr, e),
@@ -104,13 +101,21 @@ where
         client.read_exact(&mut methods).await.context("Failed to read SOCKS methods")?;
 
         let mut auth_method = 0xFF;
-        if methods.contains(&0x00) {
-            auth_method = 0x00;
-        } else if methods.contains(&0x02) {
+        
+        // PRIORITY 1: Always choose Username/Password if the browser offers it (For Tor Circuit Isolation)
+        if methods.contains(&0x02) {
             auth_method = 0x02; 
+        } 
+        // PRIORITY 2: Fallback to No Auth
+        else if methods.contains(&0x00) {
+            auth_method = 0x00;
         }
 
         if auth_method == 0xFF {
+            // THE DIAGNOSTIC LOGGER: Print exactly what the browser is asking for
+            let hex_methods: Vec<String> = methods.iter().map(|b| format!("0x{:02X}", b)).collect();
+            tracing::warn!("REJECTED: Browser requested unsupported SOCKS auth methods: {:?}", hex_methods);
+            
             methods.zeroize();
             let _ = client.write_all(&[0x05, 0xFF]).await;
             let _ = client.flush().await; 
@@ -123,7 +128,6 @@ where
 
         let mut cred_hash: Option<u64> = None;
 
-        // ISOLATESOCKSAUTH LOGIC
         if auth_method == 0x02 {
             let mut auth_ver = [0u8; 2];
             client.read_exact(&mut auth_ver).await.context("Failed to read Auth VER/ULEN")?;
@@ -139,13 +143,11 @@ where
             let mut passwd = vec![0u8; plen];
             client.read_exact(&mut passwd).await.context("Failed to read Password")?;
 
-            // Generate a mathematical hash of the credentials to act as the circuit ID
             let mut hasher = DefaultHasher::new();
             uname.hash(&mut hasher);
             passwd.hash(&mut hasher);
             cred_hash = Some(hasher.finish());
 
-            // INSTANT DESTRUCTION of real metadata
             auth_ver.zeroize();
             uname.zeroize();
             plen_buf.zeroize();
@@ -201,7 +203,7 @@ where
     let (mut host, port, cred_hash) = match handshake_result {
         Ok(Ok(res)) => res,
         Ok(Err(e)) => {
-            tracing::warn!("SOCKS Protocol Error: {:#}", e);
+            tracing::warn!("SOCKS Error: {:#}", e);
             let _ = reply_failure(&mut client).await;
             return Ok(());
         }
@@ -212,13 +214,10 @@ where
         }
     };
 
-    // Apply the circuit isolation logic
     let stream_token = match cred_hash {
         Some(hash) => {
             let mut map = isolation_map.lock().unwrap();
-            // Prevent RAM leaks from aggressive browser tracking
             if map.len() > 1000 {
-                tracing::info!("Circuit map full. Purging ephemeral circuits.");
                 map.clear();
             }
             map.entry(hash).or_insert_with(IsolationToken::new).clone()
@@ -226,7 +225,7 @@ where
         None => default_token,
     };
 
-    tracing::info!("SOCKS valid. Routing {}:{} through Tor...", host, port);
+    tracing::info!("Routing {}:{} through Tor...", host, port);
 
     let mut prefs = StreamPrefs::new();
     prefs.set_isolation(stream_token);
@@ -235,10 +234,7 @@ where
     host.zeroize(); 
 
     let tor_stream: DataStream = match tor_stream_result {
-        Ok(stream) => {
-            tracing::info!("Successfully established Tor circuit");
-            stream
-        }
+        Ok(stream) => stream,
         Err(e) => {
             tracing::warn!("Tor failed to route to target: {}", e);
             let _ = reply_failure(&mut client).await;
@@ -257,7 +253,6 @@ where
         zeroizing_copy(tr, cw),
     );
     
-    tracing::debug!("Connection closed cleanly.");
     Ok(())
 }
 
