@@ -49,7 +49,6 @@ pub async fn start_socks_server<R: Runtime>(
     loop {
         let (socket, peer_addr) = listener.accept().await?;
         
-        // CRITICAL: Prevent TCP Nagle deadlocks that freeze the browser
         if let Err(e) = socket.set_nodelay(true) {
             tracing::warn!("Failed to set TCP_NODELAY: {}", e);
         }
@@ -60,7 +59,7 @@ pub async fn start_socks_server<R: Runtime>(
         tokio::spawn(async move {
             match acceptor.accept(socket).await {
                 Ok(tls_stream) => {
-                    tracing::info!("TLS connection established from {}", peer_addr);
+                    tracing::debug!("TLS connection established from {}", peer_addr);
                     let _ = handle_socks_connection(tls_stream, tor).await;
                 }
                 Err(e) => tracing::warn!("TLS handshake failed from {}: {}", peer_addr, e),
@@ -90,7 +89,15 @@ where
         let mut methods = vec![0u8; nmethods];
         client.read_exact(&mut methods).await.context("Failed to read SOCKS methods")?;
 
-        if !methods.contains(&0x00) {
+        // Support both "No Auth" (0x00) and "Username/Password" (0x02) for circuit isolation
+        let mut auth_method = 0xFF;
+        if methods.contains(&0x00) {
+            auth_method = 0x00;
+        } else if methods.contains(&0x02) {
+            auth_method = 0x02;
+        }
+
+        if auth_method == 0xFF {
             methods.zeroize();
             let _ = client.write_all(&[0x05, 0xFF]).await;
             let _ = client.flush().await; 
@@ -98,11 +105,38 @@ where
         }
         methods.zeroize();
         
-        // Send auth success (The first 2 bytes)
-        client.write_all(&[0x05, 0x00]).await?;
+        // 1. Send method selection
+        client.write_all(&[0x05, auth_method]).await?;
         client.flush().await?; 
 
-        // Read connect request
+        // 2. Handle Username/Password subnegotiation if requested
+        if auth_method == 0x02 {
+            let mut auth_ver = [0u8; 2]; // VER + ULEN
+            client.read_exact(&mut auth_ver).await.context("Failed to read Auth VER/ULEN")?;
+            
+            let ulen = auth_ver[1] as usize;
+            let mut uname = vec![0u8; ulen];
+            client.read_exact(&mut uname).await.context("Failed to read Username")?;
+            
+            let mut plen_buf = [0u8; 1];
+            client.read_exact(&mut plen_buf).await.context("Failed to read PLEN")?;
+            
+            let plen = plen_buf[0] as usize;
+            let mut passwd = vec![0u8; plen];
+            client.read_exact(&mut passwd).await.context("Failed to read Password")?;
+
+            // Zeroize credentials from memory immediately
+            auth_ver.zeroize();
+            uname.zeroize();
+            plen_buf.zeroize();
+            passwd.zeroize();
+
+            // Send Auth Success (VER: 0x01, STATUS: 0x00)
+            client.write_all(&[0x01, 0x00]).await?;
+            client.flush().await?;
+        }
+
+        // 3. Read connect request
         let mut req = [0u8; 4];
         client.read_exact(&mut req).await.context("Failed to read SOCKS connect request")?;
 
@@ -162,6 +196,8 @@ where
 
     tracing::info!("SOCKS valid. Routing {}:{} through Tor...", host, port);
 
+    // We generate a new isolation token for every single request anyway, 
+    // guaranteeing privacy regardless of browser behavior.
     let mut prefs = StreamPrefs::new();
     prefs.set_isolation(IsolationToken::new());
 
@@ -174,7 +210,6 @@ where
             stream
         }
         Err(e) => {
-            // IF WIREGUARD HAS NO INTERNET, THIS WILL TRIGGER (And send the final 10 bytes)
             tracing::warn!("Tor failed to route to target: {}", e);
             let _ = reply_failure(&mut client).await;
             return Ok(());
@@ -192,7 +227,7 @@ where
         zeroizing_copy(tr, cw),
     );
     
-    tracing::info!("Connection closed cleanly.");
+    tracing::debug!("Connection closed cleanly.");
     Ok(())
 }
 
