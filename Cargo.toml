@@ -25,7 +25,7 @@ dns-message-parser = "0.9"
 # === CLI & Utils ===
 clap = { version = "4.5", features = ["derive"] }
 rand = "0.10"
-rand_distr = "0.5"
+rand_distr = "0.6"
 chrono = "0.4.39"
 dotenvy = "0.15"
 anyhow = "1.0"
