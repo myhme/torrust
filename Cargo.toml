@@ -11,7 +11,8 @@ rustls-pemfile = "2.1"
 rustls-pki-types = "1.4"
 
 # === Tor / Arti ===
-arti-client = { version = "0.39.0", default-features = false, features = ["tokio", "rustls", "static-sqlite"] }
+# Added 'onion-service-client' to the features list
+arti-client = { version = "0.39.0", default-features = false, features = ["tokio", "rustls", "static-sqlite", "onion-service-client"] }
 tor-rtcompat = { version = "0.39.0", features = ["tokio", "rustls"] }
 
 # === Async Runtime ===
