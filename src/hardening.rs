@@ -1,4 +1,7 @@
 // src/hardening.rs
+//
+// Applies strict kernel-level limits to prevent state exfiltration,
+// swap leakage, or privilege escalation.
 
 use anyhow::{Context, Result};
 use tracing::{info, warn};

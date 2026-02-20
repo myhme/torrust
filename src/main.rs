@@ -1,8 +1,7 @@
 // src/main.rs
 //
 // Minimal, Tor-default lifecycle.
-// No paranoia knobs, no timing tricks, no uniqueness.
-// Behaviorally aligned with Tor Browser using embedded Arti.
+// Enforces zero-trust process bounds, memory locking, and environment-driven logging.
 
 mod config;
 mod proxy;
@@ -13,6 +12,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use std::{fs, sync::Arc};
 use tracing::{error, info, warn};
+use tracing_subscriber::{fmt, EnvFilter, prelude::*};
 
 use arti_client::{
     TorClient,
@@ -41,11 +41,11 @@ async fn main() -> Result<()> {
         .expect("Failed to install crypto provider");
 
     // ------------------------------------------------------------
-    // Logging (minimal, no behavioral metadata)
+    // Logging (Respects RUST_LOG environment variable)
     // ------------------------------------------------------------
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .with_writer(std::io::stdout)
+    tracing_subscriber::registry()
+        .with(fmt::layer().with_target(false).with_writer(std::io::stdout))
+        .with(EnvFilter::from_default_env())
         .init();
 
     let args = Args::parse();
@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
     }
 
     // ------------------------------------------------------------
-    // Tor configuration (NO overrides, NO paranoia)
+    // Tor configuration
     // ------------------------------------------------------------
     info!("Configuring Tor client");
 
@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
         .state_dir(CfgPath::new(cfg.tor_state_dir.to_string_lossy().into_owned()))
         .cache_dir(CfgPath::new(cfg.tor_cache_dir.to_string_lossy().into_owned()))
         .permissions()
-        .dangerously_trust_everyone();
+        .dangerously_trust_everyone(); // Safe because directory is in a locked-down container tmpfs
 
     let tor_cfg = tor_cfg
         .build()
@@ -145,15 +145,11 @@ async fn main() -> Result<()> {
     // Optional cover traffic (independent, boring, non-unique)
     // ------------------------------------------------------------
     if cfg.chaff_enabled {
-        // IMPORTANT:
-        // - Not awaited
-        // - Not tied to user traffic
-        // - Fixed-rate, no randomness
         chaff::start_background_noise(tor_client.clone());
     }
 
     // ------------------------------------------------------------
-    // Shutdown handling (normal Tor client behavior)
+    // Shutdown handling
     // ------------------------------------------------------------
     match signal::ctrl_c().await {
         Ok(()) => info!("Shutdown signal received"),

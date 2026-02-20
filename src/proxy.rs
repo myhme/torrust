@@ -65,11 +65,12 @@ pub async fn start_socks_server<R: Runtime>(
         let acceptor = tls_acceptor.clone();
         let iso_map = isolation_map.clone();
         let def_token = default_token.clone();
+        let auto_isolate = cfg.auto_isolate_domains; // Capture the config flag
 
         tokio::spawn(async move {
             match acceptor.accept(socket).await {
                 Ok(tls_stream) => {
-                    let _ = handle_socks_connection(tls_stream, tor, iso_map, def_token).await;
+                    let _ = handle_socks_connection(tls_stream, tor, iso_map, def_token, auto_isolate).await;
                 }
                 Err(e) => tracing::warn!("TLS handshake failed from {}: {}", peer_addr, e),
             }
@@ -82,6 +83,7 @@ async fn handle_socks_connection<R: Runtime, S>(
     tor: Arc<TorClient<R>>,
     isolation_map: IsolationMap,
     default_token: IsolationToken,
+    auto_isolate: bool, // NEW: Receive the toggle flag
 ) -> Result<()>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
@@ -95,9 +97,8 @@ where
             return Err(anyhow::anyhow!("Invalid SOCKS version"));
         }
         
-        // FIX: Read the number of methods BEFORE wiping the memory
         let nmethods = header[1] as usize;
-        header.zeroize(); // Now it is safe to erase
+        header.zeroize(); 
 
         let mut methods = vec![0u8; nmethods];
         client.read_exact(&mut methods).await.context("Failed to read SOCKS methods")?;
@@ -112,9 +113,6 @@ where
         }
 
         if auth_method == 0xFF {
-            let hex_methods: Vec<String> = methods.iter().map(|b| format!("0x{:02X}", b)).collect();
-            tracing::warn!("REJECTED: Browser requested unsupported SOCKS auth methods: {:?}", hex_methods);
-            
             methods.zeroize();
             let _ = client.write_all(&[0x05, 0xFF]).await;
             let _ = client.flush().await; 
@@ -164,9 +162,8 @@ where
             return Err(anyhow::anyhow!("Invalid SOCKS command"));
         }
         
-        // FIX: Extract the address type BEFORE wiping the memory
         let addr_type = req[3];
-        req.zeroize(); // Now it is safe to erase
+        req.zeroize(); 
 
         let (host, port) = match addr_type {
             0x01 => {
@@ -218,16 +215,34 @@ where
 
     let stream_token = match cred_hash {
         Some(hash) => {
+            // SOCKS Auth provided: Isolate based on the provided credentials
             let mut map = isolation_map.lock().unwrap();
             if map.len() > 1000 {
                 map.clear();
             }
             map.entry(hash).or_insert_with(IsolationToken::new).clone()
         }
-        None => default_token,
+        None => {
+            // No SOCKS Auth provided
+            if auto_isolate {
+                // Feature ON: Isolate based on the target domain
+                let mut hasher = DefaultHasher::new();
+                host.hash(&mut hasher);
+                let host_hash = hasher.finish();
+                
+                let mut map = isolation_map.lock().unwrap();
+                if map.len() > 1000 {
+                    map.clear();
+                }
+                map.entry(host_hash).or_insert_with(IsolationToken::new).clone()
+            } else {
+                // Feature OFF: Route through the default shared circuit
+                default_token
+            }
+        }
     };
 
-    tracing::info!("Routing {}:{} through Tor...", host, port);
+    tracing::debug!("Routing {}:{} through Tor...", host, port);
 
     let mut prefs = StreamPrefs::new();
     prefs.set_isolation(stream_token);
@@ -257,6 +272,7 @@ where
     
     Ok(())
 }
+
 
 async fn zeroizing_copy<R, W>(mut reader: R, mut writer: W) -> Result<()>
 where

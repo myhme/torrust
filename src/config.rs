@@ -10,10 +10,9 @@ pub struct Config {
     pub socks_port: u16,
     pub strict_mode: bool,
     pub chaff_enabled: bool,
+    pub auto_isolate_domains: bool, // NEW: Toggle for domain-based isolation
     pub tor_state_dir: PathBuf,
     pub tor_cache_dir: PathBuf,
-    
-    // TLS Certificate Paths (Expected to be on RAM disk)
     pub tls_cert_path: PathBuf,
     pub tls_key_path: PathBuf,
 }
@@ -28,6 +27,9 @@ pub fn load() -> Config {
 
     let strict_mode = env::var("SECMEM_STRICT").unwrap_or_default() == "1";
     let chaff_enabled = env::var("TORGO_ENABLE_CHAFF").unwrap_or_default() == "1";
+    
+    // NEW: Read the toggle from environment, default to false if not set
+    let auto_isolate_domains = env::var("AUTO_ISOLATE_DOMAINS").unwrap_or_default() == "1";
 
     let tor_state_dir = env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
@@ -49,6 +51,7 @@ pub fn load() -> Config {
         socks_port,
         strict_mode,
         chaff_enabled,
+        auto_isolate_domains,
         tor_state_dir,
         tor_cache_dir,
         tls_cert_path,
@@ -56,10 +59,11 @@ pub fn load() -> Config {
     };
 
     info!(
-        "Config loaded: SOCKS={} (TLS), Strict={}, Chaff={}",
+        "Config loaded: SOCKS={} (TLS), Strict={}, Chaff={}, Auto-Isolate={}",
         cfg.socks_port,
         cfg.strict_mode,
         cfg.chaff_enabled,
+        cfg.auto_isolate_domains
     );
 
     cfg
