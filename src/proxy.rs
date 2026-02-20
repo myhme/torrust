@@ -18,6 +18,8 @@ use tor_rtcompat::Runtime;
 use zeroize::Zeroize;
 
 use tokio_rustls::rustls::ServerConfig;
+use tokio_rustls::rustls::server::WebPkiClientVerifier;
+use tokio_rustls::rustls::RootCertStore;
 use tokio_rustls::TlsAcceptor;
 use rustls_pemfile::{certs, private_key};
 
@@ -29,30 +31,39 @@ pub async fn start_socks_server<R: Runtime>(
     tor: Arc<TorClient<R>>,
     cfg: Config,
 ) -> Result<()> {
-    let cert_file = File::open(&cfg.tls_cert_path)
-        .with_context(|| format!("Failed to open cert: {:?}", cfg.tls_cert_path))?;
-    let key_file = File::open(&cfg.tls_key_path)
-        .with_context(|| format!("Failed to open key: {:?}", cfg.tls_key_path))?;
-
-    let certs: Vec<_> = certs(&mut BufReader::new(cert_file)).filter_map(Result::ok).collect();
+    // 1. Load Server Cert and Key
+    let cert_file = File::open(&cfg.tls_cert_path).context("Failed to open cert")?;
+    let key_file = File::open(&cfg.tls_key_path).context("Failed to open key")?;
+    let certs_vec: Vec<_> = certs(&mut BufReader::new(cert_file)).filter_map(Result::ok).collect();
     let key = private_key(&mut BufReader::new(key_file))?.context("Invalid private key")?;
 
+    // 2. Load the CA Certificate for mTLS verification
+    let ca_file = File::open(&cfg.tls_client_ca_path).context("Failed to open CA cert")?;
+    let ca_certs: Vec<_> = certs(&mut BufReader::new(ca_file)).filter_map(Result::ok).collect();
+    
+    let mut roots = RootCertStore::empty();
+    for cert in ca_certs {
+        roots.add(cert).context("Failed to add CA cert to trust roots")?;
+    }
+    let client_verifier = WebPkiClientVerifier::builder(roots.into())
+        .build()
+        .context("Failed to build client verifier")?;
+
+    // 3. Enforce mTLS
     let server_config = ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
+        .with_client_cert_verifier(client_verifier) // <-- The Cryptographic Bouncer
+        .with_single_cert(certs_vec, key)
         .context("Failed to build TLS config")?;
 
     let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
 
     let bind_addr = SocketAddr::from(([0, 0, 0, 0], cfg.socks_port));
-    let listener = TcpListener::bind(bind_addr)
-        .await
-        .context("Failed to bind SOCKS listener")?;
+    let listener = TcpListener::bind(bind_addr).await.context("Failed to bind SOCKS listener")?;
 
     let isolation_map: IsolationMap = Arc::new(Mutex::new(HashMap::new()));
     let default_token = IsolationToken::new();
 
-    tracing::info!("SOCKS5-over-TLS proxy listening on {} (IsolateSOCKSAuth enabled)", bind_addr);
+    tracing::info!("mTLS SOCKS5 proxy listening on {}", bind_addr);
 
     loop {
         let (socket, peer_addr) = listener.accept().await?;
@@ -65,14 +76,14 @@ pub async fn start_socks_server<R: Runtime>(
         let acceptor = tls_acceptor.clone();
         let iso_map = isolation_map.clone();
         let def_token = default_token.clone();
-        let auto_isolate = cfg.auto_isolate_domains; // Capture the config flag
+        let auto_isolate = cfg.auto_isolate_domains; 
 
         tokio::spawn(async move {
             match acceptor.accept(socket).await {
                 Ok(tls_stream) => {
                     let _ = handle_socks_connection(tls_stream, tor, iso_map, def_token, auto_isolate).await;
                 }
-                Err(e) => tracing::warn!("TLS handshake failed from {}: {}", peer_addr, e),
+                Err(e) => tracing::warn!("mTLS handshake failed (Unauthorized probe dropped from {}): {}", peer_addr, e),
             }
         });
     }
@@ -83,7 +94,7 @@ async fn handle_socks_connection<R: Runtime, S>(
     tor: Arc<TorClient<R>>,
     isolation_map: IsolationMap,
     default_token: IsolationToken,
-    auto_isolate: bool, // NEW: Receive the toggle flag
+    auto_isolate: bool,
 ) -> Result<()>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
@@ -215,28 +226,20 @@ where
 
     let stream_token = match cred_hash {
         Some(hash) => {
-            // SOCKS Auth provided: Isolate based on the provided credentials
             let mut map = isolation_map.lock().unwrap();
-            if map.len() > 1000 {
-                map.clear();
-            }
+            if map.len() > 1000 { map.clear(); }
             map.entry(hash).or_insert_with(IsolationToken::new).clone()
         }
         None => {
-            // No SOCKS Auth provided
             if auto_isolate {
-                // Feature ON: Isolate based on the target domain
                 let mut hasher = DefaultHasher::new();
                 host.hash(&mut hasher);
                 let host_hash = hasher.finish();
                 
                 let mut map = isolation_map.lock().unwrap();
-                if map.len() > 1000 {
-                    map.clear();
-                }
+                if map.len() > 1000 { map.clear(); }
                 map.entry(host_hash).or_insert_with(IsolationToken::new).clone()
             } else {
-                // Feature OFF: Route through the default shared circuit
                 default_token
             }
         }
@@ -272,7 +275,6 @@ where
     
     Ok(())
 }
-
 
 async fn zeroizing_copy<R, W>(mut reader: R, mut writer: W) -> Result<()>
 where

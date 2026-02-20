@@ -8,6 +8,13 @@ mod proxy;
 mod chaff;
 mod hardening;
 
+// ------------------------------------------------------------
+// PARANOIA TIER: Enforce the secure memory allocator globally
+// This aggressively zeroes freed memory fragments on the heap.
+// ------------------------------------------------------------
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::{fs, sync::Arc};
@@ -55,7 +62,7 @@ async fn main() -> Result<()> {
     // Zero-trust process hardening
     // ------------------------------------------------------------
     if cfg.strict_mode {
-        info!("Strict zero-trust mode enabled");
+        info!("Strict zero-trust mode enabled (mTLS + Secure Heap)");
 
         if let Err(e) = hardening::apply_protections(true) {
             error!("Security hardening failed: {e}");

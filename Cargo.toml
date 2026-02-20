@@ -11,7 +11,6 @@ rustls-pemfile = "2.1"
 rustls-pki-types = "1.4"
 
 # === Tor / Arti ===
-# Added 'onion-service-client' to the features list
 arti-client = { version = "0.39.0", default-features = false, features = ["tokio", "rustls", "static-sqlite", "onion-service-client"] }
 tor-rtcompat = { version = "0.39.0", features = ["tokio", "rustls"] }
 
@@ -25,8 +24,6 @@ dns-message-parser = "0.9"
 
 # === CLI & Utils ===
 clap = { version = "4.5", features = ["derive"] }
-rand = "0.10"
-rand_distr = "0.6"
 chrono = "0.4.39"
 dotenvy = "0.15"
 anyhow = "1.0"
@@ -35,6 +32,9 @@ libc = "0.2"
 rlimit = "0.11"
 zeroize = "1.8"
 bytes = "1.9"
+
+# === Secure Allocator ===
+mimalloc = { version = "0.1", features = ["secure"] }
 
 # === Logging ===
 tracing = "0.1"

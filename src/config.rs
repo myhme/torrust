@@ -10,11 +10,12 @@ pub struct Config {
     pub socks_port: u16,
     pub strict_mode: bool,
     pub chaff_enabled: bool,
-    pub auto_isolate_domains: bool, // NEW: Toggle for domain-based isolation
+    pub auto_isolate_domains: bool,
     pub tor_state_dir: PathBuf,
     pub tor_cache_dir: PathBuf,
     pub tls_cert_path: PathBuf,
     pub tls_key_path: PathBuf,
+    pub tls_client_ca_path: PathBuf, // NEW: CA cert for mTLS
 }
 
 pub fn load() -> Config {
@@ -27,8 +28,6 @@ pub fn load() -> Config {
 
     let strict_mode = env::var("SECMEM_STRICT").unwrap_or_default() == "1";
     let chaff_enabled = env::var("TORGO_ENABLE_CHAFF").unwrap_or_default() == "1";
-    
-    // NEW: Read the toggle from environment, default to false if not set
     let auto_isolate_domains = env::var("AUTO_ISOLATE_DOMAINS").unwrap_or_default() == "1";
 
     let tor_state_dir = env::var("XDG_DATA_HOME")
@@ -47,6 +46,11 @@ pub fn load() -> Config {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/etc/torrust/certs/tls.key"));
 
+    // NEW: Load the CA cert path
+    let tls_client_ca_path = env::var("TLS_CLIENT_CA_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/etc/torrust/certs/ca.crt"));
+
     let cfg = Config {
         socks_port,
         strict_mode,
@@ -56,13 +60,13 @@ pub fn load() -> Config {
         tor_cache_dir,
         tls_cert_path,
         tls_key_path,
+        tls_client_ca_path,
     };
 
     info!(
-        "Config loaded: SOCKS={} (TLS), Strict={}, Chaff={}, Auto-Isolate={}",
+        "Config loaded: SOCKS={} (mTLS), Strict={}, Auto-Isolate={}",
         cfg.socks_port,
         cfg.strict_mode,
-        cfg.chaff_enabled,
         cfg.auto_isolate_domains
     );
 
