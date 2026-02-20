@@ -41,32 +41,34 @@ RUN RUSTFLAGS="-C target-feature=+crt-static -C link-args=-fstack-protector-all 
 # ================================
 FROM alpine:${ALPINE_VERSION}
 
-# Re-declare ARGs for this stage (CRITICAL FIX)
+# Re-declare ARGs for this stage
 ARG APP_NAME
 ARG TARGET_ARCH
 
 # ---- Minimal runtime deps ----
-# ca-certificates needed for Tor directory authorities
-RUN apk add --no-cache ca-certificates
+# libcap is required to set capabilities on the binary
+RUN apk add --no-cache ca-certificates libcap
 
 # ---- Create unprivileged user ----
 RUN addgroup -S torrust \
  && adduser  -S -D -H -u 10001 -G torrust torrust
 
 # ---- Pre-create Tor state layout (IMMUTABLE STRUCTURE) ----
-# This is REQUIRED to remove AppArmor 'c' permission
 RUN mkdir -p /var/lib/tor/state/state \
  && chown -R torrust:torrust /var/lib/tor \
  && chmod 700 /var/lib/tor/state/state
 
 # ---- Copy binary ----
-# Now ${TARGET_ARCH} will be correctly populated
 COPY --from=builder /app/target/${TARGET_ARCH}/release/${APP_NAME} /torrust
 
-# ---- Permissions hardening ----
-RUN chmod 0555 /torrust
+# ---- Permissions & Capabilities hardening ----
+# 1. Ensure the binary is executable
+# 2. Grant the binary permission to lock memory (mlockall) even for non-root users
+RUN chmod 0555 /torrust \
+ && setcap 'cap_ipc_lock=+ep' /torrust
 
 # ---- Drop privileges permanently ----
+# The binary now carries the "Effective" and "Permitted" IPC_LOCK capability
 USER 10001
 
 # ---- No shell, no args injection ----
