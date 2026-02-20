@@ -94,25 +94,24 @@ where
             header.zeroize();
             return Err(anyhow::anyhow!("Invalid SOCKS version"));
         }
-        header.zeroize();
-
+        
+        // FIX: Read the number of methods BEFORE wiping the memory
         let nmethods = header[1] as usize;
+        header.zeroize(); // Now it is safe to erase
+
         let mut methods = vec![0u8; nmethods];
         client.read_exact(&mut methods).await.context("Failed to read SOCKS methods")?;
 
         let mut auth_method = 0xFF;
         
-        // PRIORITY 1: Always choose Username/Password if the browser offers it (For Tor Circuit Isolation)
         if methods.contains(&0x02) {
             auth_method = 0x02; 
         } 
-        // PRIORITY 2: Fallback to No Auth
         else if methods.contains(&0x00) {
             auth_method = 0x00;
         }
 
         if auth_method == 0xFF {
-            // THE DIAGNOSTIC LOGGER: Print exactly what the browser is asking for
             let hex_methods: Vec<String> = methods.iter().map(|b| format!("0x{:02X}", b)).collect();
             tracing::warn!("REJECTED: Browser requested unsupported SOCKS auth methods: {:?}", hex_methods);
             
@@ -164,9 +163,12 @@ where
             req.zeroize();
             return Err(anyhow::anyhow!("Invalid SOCKS command"));
         }
-        req.zeroize();
+        
+        // FIX: Extract the address type BEFORE wiping the memory
+        let addr_type = req[3];
+        req.zeroize(); // Now it is safe to erase
 
-        let (host, port) = match req[3] {
+        let (host, port) = match addr_type {
             0x01 => {
                 let mut addr = [0u8; 4];
                 client.read_exact(&mut addr).await?;
